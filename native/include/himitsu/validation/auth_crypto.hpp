@@ -1,11 +1,17 @@
 #pragma once
 
+#include "himitsu/validation/validation_backend.hpp"
 #include <array>
 #include <span>
 #include <string>
 #include <vector>
 
 namespace himitsu::validation::crypto {
+std::wstring credentials_path();
+backend::Request load_credentials(const std::wstring& path,bool migrate=true);
+bool save_credentials(const std::wstring& path,const std::string& username,const std::string& token,bool remember);
+bool rotate_credentials(const std::wstring& path,const std::string& username,const std::string& previous,const std::string& next);
+
 std::array<unsigned char, 32> sha256(std::span<const unsigned char> input);
 std::string sha256_hex(std::span<const unsigned char> input);
 std::string base64_encode(std::span<const unsigned char> input);

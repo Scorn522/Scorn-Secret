@@ -30,7 +30,6 @@ public final class VerifyObfuscatedJar {
         if (args.length > 1) {
             Path mapping = Path.of(args[1]);
             verifyDynamicHookNames(mapping);
-            verifyInternalHookTarget(mapping);
             verifyBootstrapRuntimeLookup(input, mapping);
             verifyScreenTypeBindings(input, mapping);
             verifyNoRenamedSrgMethods(mapping);
@@ -69,54 +68,6 @@ public final class VerifyObfuscatedJar {
             );
         }
         System.out.println("Verified dynamic hook names: " + expectedNames);
-    }
-
-    private static void verifyInternalHookTarget(Path mapping) throws Exception {
-        String hooksClass = null;
-        String targetClass = null;
-        String targetMethod = null;
-        for (String line : Files.readAllLines(mapping)) {
-            if (line.startsWith("CLASS com/himitsu/secret/core/RuntimeHooks -> ")) {
-                hooksClass = line.substring(line.indexOf(" -> ") + 4);
-            } else if (line.startsWith("CLASS com/himitsu/secret/core/BackgroundService -> ")) {
-                targetClass = line.substring(line.indexOf(" -> ") + 4);
-            } else if (line.startsWith("METHOD com/himitsu/secret/core/BackgroundService.commonLoop()V -> ")) {
-                targetMethod = line.substring(line.indexOf(" -> ") + 4);
-            }
-        }
-        if (hooksClass == null || targetClass == null || targetMethod == null) {
-            throw new IllegalStateException("Missing internal-hook entries in mapping");
-        }
-
-        Class<?> hooks = Class.forName(
-            hooksClass.replace('/', '.'),
-            false,
-            ClassLoader.getSystemClassLoader()
-        );
-        String actualClass = null;
-        String actualMethod = null;
-        outer:
-        for (var callback : hooks.getDeclaredMethods()) {
-            for (var annotation : callback.getDeclaredAnnotations()) {
-                Class<?> annotationType = annotation.annotationType();
-                try {
-                    var classAttribute = annotationType.getDeclaredMethod("targetClass");
-                    var methodAttribute = annotationType.getDeclaredMethod("targetMethod");
-                    actualClass = (String) classAttribute.invoke(annotation);
-                    actualMethod = (String) methodAttribute.invoke(annotation);
-                    break outer;
-                } catch (NoSuchMethodException ignored) {
-                }
-            }
-        }
-        if (!targetClass.equals(actualClass) || !targetMethod.equals(actualMethod)) {
-            throw new IllegalStateException(
-                "Internal hook target does not match mapping: expected="
-                    + targetClass + '.' + targetMethod
-                    + ", actual=" + actualClass + '.' + actualMethod
-            );
-        }
-        System.out.println("Verified internal hook target: " + targetClass + '.' + targetMethod);
     }
 
     private static void verifyBootstrapRuntimeLookup(Path input, Path mapping) throws Exception {

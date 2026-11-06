@@ -4,6 +4,7 @@
 #include "himitsu/embedded/login_pig_sprite.hpp"
 
 #include "himitsu/validation/validation_backend.hpp"
+#include "himitsu/validation/auth_crypto.hpp"
 #include "himitsu/validation/capability_registry.hpp"
 #include "himitsu/validation/game_pause.hpp"
 #include "himitsu/validation/integrity_check.hpp"
@@ -70,6 +71,8 @@ struct UiState {
     std::array<char, 160> username{};
     std::array<char, 160> password{};
     bool remember_me = false;
+    bool used_refresh = false;
+    std::string refresh_token, refresh_user;
 };
 
 UiState* active_ui = nullptr;
@@ -199,133 +202,21 @@ std::string trim(std::string value) {
     return value.substr(first, last - first + 1);
 }
 
-std::wstring credentials_path() {
-    std::array<wchar_t, 32768> profile{};
-    const DWORD length = GetEnvironmentVariableW(
-        L"USERPROFILE",
-        profile.data(),
-        static_cast<DWORD>(profile.size())
-    );
-    if (length == 0 || length >= profile.size()) {
-        return L"Secret.ini";
-    }
-    std::wstring path(profile.data(), length);
-    if (!path.empty() && path.back() != L'\\' && path.back() != L'/') {
-        path.push_back(L'\\');
-    }
-    path.append(L"Secret.ini");
-    return path;
-}
-
+void wipe_token(std::string& value) {if(!value.empty()) SecureZeroMemory(value.data(),value.size());value.clear();}
 void load_credentials(UiState& state) {
-    const std::wstring path = credentials_path();
-    HANDLE file = CreateFileW(
-        path.c_str(),
-        GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
-        nullptr
-    );
-    if (file == INVALID_HANDLE_VALUE) return;
-
-    LARGE_INTEGER file_size{};
-    if (!GetFileSizeEx(file, &file_size)
-        || file_size.QuadPart <= 0
-        || file_size.QuadPart > 64 * 1024) {
-        CloseHandle(file);
-        return;
+    try {
+        auto saved=himitsu::validation::crypto::load_credentials(himitsu::validation::crypto::credentials_path());
+        strncpy_s(state.username.data(),state.username.size(),saved.username.c_str(),_TRUNCATE);
+        state.remember_me=saved.remember_me;state.refresh_user=std::move(saved.username);
+        state.refresh_token=std::move(saved.refresh_token);
+    } catch(...) {
+        MessageBoxW(state.window,L"无法迁移旧的明文登录记录，请检查 Secret.ini 的写入权限。",L"Secret",MB_OK|MB_ICONWARNING);
     }
-
-    std::string contents(static_cast<std::size_t>(file_size.QuadPart), '\0');
-    DWORD bytes_read = 0;
-    const BOOL read_ok = ReadFile(
-        file,
-        contents.data(),
-        static_cast<DWORD>(contents.size()),
-        &bytes_read,
-        nullptr
-    );
-    CloseHandle(file);
-    if (!read_ok || bytes_read == 0) return;
-    contents.resize(bytes_read);
-
-    bool in_info = false;
-    bool remember = false;
-    std::string username;
-    std::string password;
-    std::size_t cursor = 0;
-    while (cursor < contents.size()) {
-        const std::size_t newline = contents.find('\n', cursor);
-        const std::size_t end = newline == std::string::npos ? contents.size() : newline;
-        std::string line = contents.substr(cursor, end - cursor);
-        cursor = newline == std::string::npos ? contents.size() : newline + 1;
-        line = trim(line);
-        if (line.empty() || line[0] == ';' || line[0] == '#') continue;
-        if (line.front() == '[' && line.back() == ']') {
-            in_info = trim(line.substr(1, line.size() - 2)) == "info";
-            continue;
-        }
-        if (!in_info) continue;
-        const auto separator = line.find('=');
-        if (separator == std::string::npos) continue;
-        const std::string key = trim(line.substr(0, separator));
-        const std::string value = trim(line.substr(separator + 1));
-        if (key == "Remember") {
-            remember = value == "true" || value == "TRUE" || value == "1";
-        } else if (key == "username") {
-            username = value;
-        } else if (key == "password") {
-            password = value;
-        }
-    }
-
-    state.remember_me = remember;
-    if (remember) {
-        strncpy_s(state.username.data(), state.username.size(), username.c_str(), _TRUNCATE);
-        if (password.rfind("dpapi:", 0) != 0) {
-            strncpy_s(state.password.data(), state.password.size(), password.c_str(), _TRUNCATE);
-        }
-    }
-    if (!password.empty()) SecureZeroMemory(password.data(), password.size());
-    if (!contents.empty()) SecureZeroMemory(contents.data(), contents.size());
 }
-
 void save_credentials(const UiState& state) {
-    std::string contents;
-    contents.reserve(384);
-    contents.append("[info]\r\nRemember = ");
-    contents.append(state.remember_me ? "true" : "false");
-    contents.append("\r\nusername = ");
-    if (state.remember_me) contents.append(state.username.data());
-    contents.append("\r\npassword = ");
-    if (state.remember_me) contents.append(state.password.data());
-    contents.append("\r\n");
-
-    const std::wstring path = credentials_path();
-    HANDLE file = CreateFileW(
-        path.c_str(),
-        GENERIC_WRITE,
-        FILE_SHARE_READ,
-        nullptr,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL,
-        nullptr
-    );
-    if (file != INVALID_HANDLE_VALUE) {
-        DWORD bytes_written = 0;
-        WriteFile(
-            file,
-            contents.data(),
-            static_cast<DWORD>(contents.size()),
-            &bytes_written,
-            nullptr
-        );
-        FlushFileBuffers(file);
-        CloseHandle(file);
-    }
-    if (!contents.empty()) SecureZeroMemory(contents.data(), contents.size());
+    if(!himitsu::validation::crypto::save_credentials(himitsu::validation::crypto::credentials_path(),
+            state.refresh_user.empty()?trim(state.username.data()):state.refresh_user,state.refresh_token,state.remember_me))
+        MessageBoxW(state.window,L"无法保存加密登录记录；本次登录不会保存密码。",L"Secret",MB_OK|MB_ICONWARNING);
 }
 
 std::wstring utf8_to_wide(const std::string& value) {
@@ -381,13 +272,17 @@ void start_authentication(UiState& state) {
         show_login_error(state, "Please enter the username");
         return;
     }
-    if (state.password[0] == '\0') {
+    const bool refresh=state.password[0]=='\0' && state.remember_me
+        && state.refresh_user==username && !state.refresh_token.empty();
+    if (state.password[0] == '\0' && !refresh) {
         show_login_error(state, "Please enter the password");
         return;
     }
 
     if (state.authentication_thread.joinable()) state.authentication_thread.join();
     std::string password = state.password.data();
+    std::string token=refresh?state.refresh_token:std::string{};
+    state.used_refresh=refresh;
     state.displayed_progress = 0.0F;
     state.approval_pending = false;
     state.authentication_progress.store(0.02F, std::memory_order_release);
@@ -397,13 +292,13 @@ void start_authentication(UiState& state) {
     }
     state.authentication_finished.store(false, std::memory_order_release);
     state.authenticating.store(true, std::memory_order_release);
-    state.authentication_thread = std::thread([&state, username, password]() mutable {
+    state.authentication_thread = std::thread([&state, username, password=std::move(password), token=std::move(token)]() mutable {
 
         himitsu::validation::backend::Request request{
             username,
             password,
-            true,
-            {},
+            true, // Renewal stays in memory even when Remember Me is disabled.
+            token,
             [&state](float progress, const std::string& step) {
                 state.authentication_progress.store(
                     std::clamp(progress, 0.0F, 1.0F),
@@ -418,6 +313,7 @@ void start_authentication(UiState& state) {
             SecureZeroMemory(request.password.data(), request.password.size());
         }
         if (!password.empty()) SecureZeroMemory(password.data(), password.size());
+        wipe_token(token);wipe_token(request.refresh_token);
         {
             std::lock_guard lock(state.authentication_mutex);
             state.authentication_result = std::move(result);
@@ -432,6 +328,7 @@ void poll_authentication(UiState& state) {
         state.approval_pending = false;
         state.authenticating.store(false, std::memory_order_release);
         save_credentials(state);
+        wipe_token(state.refresh_token);state.refresh_user.clear();
         SecureZeroMemory(state.password.data(), state.password.size());
         state.accepted = true;
         state.running = false;
@@ -448,7 +345,9 @@ void poll_authentication(UiState& state) {
     state.authentication_finished.store(false, std::memory_order_release);
 
     if (result.decision == himitsu::validation::backend::Decision::approved) {
-
+        wipe_token(state.refresh_token);state.refresh_token=std::move(result.refresh_token);
+        state.refresh_user=result.ticket_username.empty()?trim(state.username.data()):result.ticket_username;
+        strncpy_s(state.username.data(),state.username.size(),state.refresh_user.c_str(),_TRUNCATE);
         if (!himitsu::validation::integrity::verify_self(
                 state.module,
                 himitsu::validation::capability::dll_sha256())) {
@@ -470,6 +369,12 @@ void poll_authentication(UiState& state) {
 
     state.authenticating.store(false, std::memory_order_release);
     SecureZeroMemory(state.password.data(), state.password.size());
+    if(state.used_refresh && result.decision==himitsu::validation::backend::Decision::rejected) {
+        wipe_token(state.refresh_token);state.refresh_user.clear();
+        himitsu::validation::crypto::save_credentials(himitsu::validation::crypto::credentials_path(),{}, {},false);
+        MessageBoxW(state.window,L"保存的登录已失效，请重新输入密码。",L"Secret",MB_OK|MB_ICONINFORMATION);
+        return; // No approval or capability is granted by this fallback.
+    }
     show_login_error(state, result.message);
 }
 
@@ -800,7 +705,7 @@ void render_window(UiState& state) {
     ImGui::BeginDisabled(authenticating);
     ImGui::InputTextWithHint(
         "##password",
-        "请输入密码",
+        state.remember_me && !state.refresh_token.empty() && state.refresh_user==state.username.data()?"已保存登录，可直接登录或输入新密码":"请输入密码",
         state.password.data(),
         state.password.size(),
         ImGuiInputTextFlags_Password
@@ -809,7 +714,9 @@ void render_window(UiState& state) {
 
     ImGui::SetCursorPos(ImVec2(form_left, 258.0F));
     ImGui::BeginDisabled(authenticating);
-    ImGui::Checkbox("Remember Me", &state.remember_me);
+    if(ImGui::Checkbox("Remember Me", &state.remember_me) && !state.remember_me) {
+        wipe_token(state.refresh_token);state.refresh_user.clear();save_credentials(state);
+    }
     ImGui::EndDisabled();
     const float build_code_width = ImGui::CalcTextSize("[Build Code]").x;
     ImGui::SetCursorPos(ImVec2(form_left + form_width - build_code_width, 260.0F));
@@ -908,6 +815,7 @@ void render_window(UiState& state) {
 }
 
 void destroy(UiState& state) {
+    wipe_token(state.refresh_token);state.refresh_user.clear();
     if (state.imgui_ready) {
         ImGui_ImplDX9_Shutdown();
         ImGui_ImplWin32_Shutdown();
@@ -1019,6 +927,7 @@ Result run(HMODULE module) {
 
     if (state.authentication_thread.joinable()) {
         state.authentication_thread.join();
+        wipe_token(state.authentication_result.refresh_token);
     }
     const bool accepted = state.accepted;
     destroy(state);

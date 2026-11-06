@@ -16,6 +16,11 @@ public final class LoaderAwareClassWriter extends ClassWriter {
         hierarchy = new BytecodeHierarchy(loader);
     }
 
+    public LoaderAwareClassWriter(int flags,ClassLoader loader,org.objectweb.asm.tree.ClassNode node) {
+        this(flags,loader);
+        hierarchy.remember(node);
+    }
+
     @Override
     protected String getCommonSuperClass(String type1, String type2) {
         return hierarchy.commonSuperClass(type1, type2);

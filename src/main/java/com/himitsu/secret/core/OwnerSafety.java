@@ -28,13 +28,13 @@ public final class OwnerSafety {
                 ? server.connection : ((net.minecraft.client.multiplayer.ClientPacketListener)session).getConnection();
             if(previous!=null) { weapon=previous.weapon; weaponSlot=previous.weaponSlot; }
             nextCheck=player.tickCount+20;
-            motion();
+            motion(false);
         }
-        void motion() {
+        void motion(boolean repair) {
             // Store scalar values, not aliases to a Vec3 that may itself be overwritten.
             var position=player.position();
             if(finite(position)) {x=position.x;y=position.y;z=position.z;positionKnown=true;}
-            else if(positionKnown) {
+            else if(repair && positionKnown) {
                 if(position==null) {
                     player.position=new net.minecraft.world.phys.Vec3(x,y,z);
                     player.blockPosition=net.minecraft.core.BlockPos.containing(x,y,z);
@@ -46,7 +46,19 @@ public final class OwnerSafety {
             }
             var velocity=player.getDeltaMovement();
             if(finite(velocity)) {dx=velocity.x;dy=velocity.y;dz=velocity.z;motionKnown=true;}
-            else player.setDeltaMovement(motionKnown?new net.minecraft.world.phys.Vec3(dx,dy,dz):net.minecraft.world.phys.Vec3.ZERO);
+            else if(repair) player.setDeltaMovement(motionKnown?new net.minecraft.world.phys.Vec3(dx,dy,dz):net.minecraft.world.phys.Vec3.ZERO);
+            if(!repair || !positionKnown) return;
+            if(!Double.isFinite(player.xo)) player.xo=x;
+            if(!Double.isFinite(player.yo)) player.yo=y;
+            if(!Double.isFinite(player.zo)) player.zo=z;
+            if(!Double.isFinite(player.xOld)) player.xOld=x;
+            if(!Double.isFinite(player.yOld)) player.yOld=y;
+            if(!Double.isFinite(player.zOld)) player.zOld=z;
+            var box=player.getBoundingBox();
+            if(box==null || !Double.isFinite(box.minX) || !Double.isFinite(box.minY) || !Double.isFinite(box.minZ)
+                || !Double.isFinite(box.maxX) || !Double.isFinite(box.maxY) || !Double.isFinite(box.maxZ)
+                || box.minX>box.maxX || box.minY>box.maxY || box.minZ>box.maxZ)
+                player.setBoundingBox(player.getDimensions(player.getPose()).makeBoundingBox(x,y,z));
         }
         void weapon(boolean legitimate) {
             nextCheck=player.tickCount+20;
@@ -138,8 +150,9 @@ public final class OwnerSafety {
     }
     static void maintainWeapon(Player player) {
         Binding b=owners.get(player);
-        if(b!=null && b.active && b.owner) {
-            b.motion();
+        if(b!=null && b.active && b.owner && b.level==player.level() && AuthoritativeEntityTopology.open(b.level)
+            && !inLifecycle(player) && !DeathExecution.isMarked(player)) {
+            b.motion(true);
             if(b.attributes!=player.getAttributes()) refreshAttributes(b);
             if(player.tickCount-b.nextCheck>=0) b.weapon(false);
         }

@@ -17,6 +17,8 @@ public final class SecretAvatarManager {
         if(avatar==null) avatar=new SecretAvatar(x,y,z);
     }
 
+    public static boolean present(Level level) { return level!=null && avatarLevel==level && avatar!=null; }
+
     public static synchronized void clear(Level level) {
         if(avatarLevel==level) { avatar=null; proxy=null; avatarLevel=null; lastFrameKey=Long.MIN_VALUE; }
     }

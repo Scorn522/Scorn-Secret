@@ -21,6 +21,10 @@ public final class SecretEntityLifecycle {
             TargetCleanup.clearLevel(level);
             SecretEntityHooks.clearLevel(level);
             CivilizationSurvival.clearLevel(level);
+            if(level.isClientSide()) {
+                com.himitsu.secret.client.avatar.SecretAvatarManager.clear(level);
+                com.himitsu.secret.client.render.NativeRenderBridge.clearLevel(level);
+            }
         }
     }
 }

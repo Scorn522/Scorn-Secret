@@ -1,4 +1,4 @@
-﻿#include "himitsu/validation/runtime_lease.hpp"
+#include "himitsu/validation/runtime_lease.hpp"
 
 #include "himitsu/validation/auth_client.hpp"
 #include "himitsu/validation/auth_crypto.hpp"
@@ -203,7 +203,6 @@ void refresh_worker() {
             fail_closed();
         }
         wipe_string(request.refresh_token);
-        wipe_result_secrets(current);
         if (refreshed.decision != Decision::approved
             || refreshed.refresh_token.empty()
             || refreshed.ticket.empty()
@@ -231,6 +230,11 @@ void refresh_worker() {
             }
         }
 
+        // Only replace a still-matching saved login. Forgetting/changing accounts
+        // must not be undone by a late renewal response. File/DPAPI work is outside the lease lock.
+        himitsu::validation::crypto::rotate_credentials(himitsu::validation::crypto::credentials_path(),
+            current.ticket_username,current.refresh_token,refreshed.refresh_token);
+        wipe_result_secrets(current);
         bool sealed = false;
         {
             std::lock_guard lock(lease_state.mutex);

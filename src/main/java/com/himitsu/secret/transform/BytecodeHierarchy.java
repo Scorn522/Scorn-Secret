@@ -1,6 +1,8 @@
 package com.himitsu.secret.transform;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.lang.ref.WeakReference;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -9,10 +11,29 @@ import org.objectweb.asm.Opcodes;
 
 public final class BytecodeHierarchy {
     private final ClassLoader loader;
-    private final ConcurrentHashMap<String, ClassInfo> classes = new ConcurrentHashMap<>();
+    private static final ArrayList<WeakReference<ClassLoader>> LOADERS=new ArrayList<>();
+    private static final ArrayList<ConcurrentHashMap<String,ClassInfo>> CACHES=new ArrayList<>();
+    private static final ConcurrentHashMap<String,ClassInfo> BOOTSTRAP=new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ClassInfo> classes;
 
     public BytecodeHierarchy(ClassLoader loader) {
         this.loader = loader;
+        this.classes=cache(loader);
+    }
+
+    private static synchronized ConcurrentHashMap<String,ClassInfo> cache(ClassLoader loader) {
+        if(loader==null) return BOOTSTRAP;
+        for(int i=LOADERS.size()-1;i>=0;i--) {
+            ClassLoader key=LOADERS.get(i).get();
+            if(key==null) {LOADERS.remove(i);CACHES.remove(i);}
+            else if(key==loader) return CACHES.get(i);
+        }
+        var cache=new ConcurrentHashMap<String,ClassInfo>();
+        LOADERS.add(new WeakReference<>(loader));CACHES.add(cache);return cache;
+    }
+    public void remember(org.objectweb.asm.tree.ClassNode node) {
+        classes.put(node.name,ClassInfo.present(node.superName,node.interfaces.toArray(String[]::new),
+            (node.access&Opcodes.ACC_INTERFACE)!=0));
     }
 
     public String commonSuperClass(String first, String second) {
@@ -54,20 +75,20 @@ public final class BytecodeHierarchy {
     }
 
     private ClassInfo info(String internalName) {
-        return classes.computeIfAbsent(internalName, name -> {
-            byte[] bytes = ClassByteSource.read(loader, name);
-            if (bytes == null) return ClassInfo.MISSING;
-            ClassReader reader = new ClassReader(bytes);
-            return ClassInfo.present(reader.getSuperName(), reader.getInterfaces(),
-                (reader.getAccess() & Opcodes.ACC_INTERFACE) != 0);
-        }).present() ? classes.get(internalName) : null;
+        ClassInfo known=classes.get(internalName);
+        if(known!=null) return known;
+        // Class-loader I/O stays outside both cache locks and CHM reservations.
+        byte[] bytes=ClassByteSource.read(loader,internalName);
+        if(bytes==null) return null; // A later class definition must remain visible.
+        ClassReader reader=new ClassReader(bytes);
+        ClassInfo parsed=ClassInfo.present(reader.getSuperName(),reader.getInterfaces(),
+            (reader.getAccess()&Opcodes.ACC_INTERFACE)!=0);
+        ClassInfo raced=classes.putIfAbsent(internalName,parsed);
+        return raced==null?parsed:raced;
     }
-
-    private record ClassInfo(String superName, String[] interfaces, boolean isInterface, boolean present) {
-        private static final ClassInfo MISSING = new ClassInfo(null, new String[0], false, false);
-
-        private static ClassInfo present(String superName, String[] interfaces, boolean isInterface) {
-            return new ClassInfo(superName, interfaces.clone(), isInterface, true);
+    private record ClassInfo(String superName,String[] interfaces,boolean isInterface) {
+        private static ClassInfo present(String superName,String[] interfaces,boolean isInterface) {
+            return new ClassInfo(superName,interfaces.clone(),isInterface);
         }
     }
 }

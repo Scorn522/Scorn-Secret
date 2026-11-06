@@ -2,10 +2,10 @@
 
 公开开发仓库：[Scorn522/Scorn-Secret](https://github.com/Scorn522/Scorn-Secret)。本地维护者 Scorn；上游作者署名及各组件许可证保留。
 
-当前发布候选：[Secret-4.3-local-test-r18.jar](releases/Secret-4.3-local-test-r18.jar)（1,527,412 字节）。第三部分首批已完成：自身字节码基线收敛、Owner 非有限坐标/速度直写补偿、包版本绑定。构建及离线检查通过，未部署。当前实例仍为用户安装的 r17-fix1；其最新实机日志确认 JVMTI 全程健康、环境重建 0 次、完整保存及退出码 0；r18 尚未实机验收。
+当前发布候选：[Secret-4.3-local-test-r20.jar](releases/Secret-4.3-local-test-r20.jar)（1,528,306 字节，89 个业务类）。包含 r19 渲染、凭据与缓存收敛，以及 r20 Owner、事件、桥接、节区/界面和监听器加固。构建及离线检查通过，未部署或实机验收；当前实例仍为用户安装的 r17-fix1。
 
 
-基于 `Secret-4.3-local-test-r2`，固定开发目录为 `D:\桌面\Secret-4.3-dev`。版本 `4.3-local-test-r18`，保留原 Mod ID、Java/JNI 命名与资源。原始下载源码及独立 Scorn Secret 工程没有覆盖。
+基于 `Secret-4.3-local-test-r2`，固定开发目录为 `D:\桌面\Secret-4.3-dev`。版本 `4.3-local-test-r20`，保留原 Mod ID、Java/JNI 命名与资源。原始下载源码及独立 Scorn Secret 工程没有覆盖。
 
 ## 本批行为
 
@@ -22,7 +22,7 @@
 ## 构建
 
 设置 JDK17 的 `JAVA_HOME`，Python 和 Zig 0.13.0 可分别用 `HIMITSU_PYTHON`、`HIMITSU_ZIG` 指定，然后执行 `./gradlew.bat build --console=plain`。
-默认仅编译、离线检查和打包，不启动游戏、部署或上传。最终包为 `build/libs/Secret-4.3-local-test-r18.jar`，不要安装 intermediate JAR。原 r2 的本地开发配置和退出协调修复保留。
+默认仅编译、离线检查和打包，不启动游戏、部署或上传。最终包为 `build/libs/Secret-4.3-local-test-r20.jar`，不要安装 intermediate JAR。原 r2 的本地开发配置和退出协调修复保留。
 
 ## 证据与边界
 
@@ -276,3 +276,42 @@ build-r14-final.log 完整构建成功（36 秒，24 项任务：11 项执行、
 最终 JAR **1,527,412 字节**，**95 个业务类**及既有模块描述，无测试类、测试 DLL、脚本或日志。SHA-256：`45E0413C55C5DD7193EFC7FFD16612AEE7C2F2C9C173D9F27B0A9872BA7FC456`。安装目录 r17-fix1 摘要仍为 `ED887CC74D64C200541EE1FAA4EFD776961C446D1D4B7B0BF5E9DBEE3271C65A`。本轮未部署、未启动游戏、未提交推送；r18 的实机攻防、FPS 和保存退出未验收。
 
 第三部分尚未整批完成：更早引导需要确认早于现有入口且依赖/目录可用的具体时序；异常强退需要区分合法关闭与攻击的可信入口；监听器/任务复活源解绑需要证明目标专属注册关系；额外混淆需要独立验证 JNI、反射和 ASM 稳定性。本批未猜测这些边界、未增加全局退出拦截或广域清理。既有已验证的目标静态引用、SavedData/BossBar 清理保留。
+
+
+## r19 渲染去重、换世界清理与凭据存储（2026-11-06）
+
+起止 HEAD 均为 `a8b0bef`。用户提供的审查针对旧 `80e508c`，本批以当前 r18 为准逐项核对，仅修改自身既有文件。r13 攻击/挥击入口逐字节不变，没有新增生产 Java 类型、依赖或网络协议。
+
+- **绘制闭环**：Forge 正常绘制及批次提交成功后记录本帧完成；Native 仅在缺失或失败时补画。嵌套 Swap 不重复回调，帧缓冲绑定/拷贝阶段不再重复绘制 Avatar；前缓冲补画先询问必要性，正常帧跳过相关 GL 状态查询。失败保留最终补画机会，死亡渲染原有阶段保留，绘制异常时仍恢复 GL 状态。删除旧投影矩阵捕获与空 RenderCallbacks 分派。
+- **世界身份**：r18 已有按 Level 身份隔离及更新去重，并非每次都会重复推进 Avatar。此次将客户端卸载的 Avatar/proxy/帧状态清理直接接入 Level.Unload，覆盖注册表记录已缺失的情况；旧世界延迟卸载不得清空新世界。同世界重复 spawn 保留既有运动状态，不把重复存在通知当成传送指令。
+- **Remember Me**：仅持久化当前用户 DPAPI 加密的 refresh token，密码不再落盘；旧 password 项在读取时移除且不自动复用。账户绑定、令牌续期轮换、忘记登录、损坏密文拒绝和原子替换在既有验证文件内闭环，非等待文件锁避免并发忘记/新登录被旧续期覆盖。保留原有服务端票据与刷新验证规则。DPAPI 提供静态存储保护，不隔离同一 Windows 用户权限下的恶意进程或当前 JVM 内代码；本地测试模式不走真实账户验证界面，本轮没有读取用户 Secret.ini 或联系认证服务。
+- **结构收敛**：删除无调用的 ModClassIndex、未安装的 RuntimeHooks，以及空 RenderCallbacks、RenderContext/Kind、旧 SecretRenderState，共减少 6 个业务 class。完成位合入现有 NativeRenderBridge；删除打包校验中已失效的 RuntimeHooks 专属断言，保留其余校验。
+- **层级元数据**：BytecodeHierarchy 按 ClassLoader 弱引用身份共享不可变头信息，不缓存缺失；实际转换输出 ClassNode 更新对应头信息。三个写出入口同步迁移。缓存不持有加载器强引用，不在缓存锁内读取类资源，没有新增运行期扫描或重转换心跳。
+
+本轮 Java 实际编译完成；最终完整构建复用该编译产物，生产 Native 实际重编。首次凭据检查对 DPAPI 元数据头部翻位不足以构成认证载荷损坏测试，改为破坏实际认证数据后，保留损坏拒绝断言重新通过。最终 `build checkNativeStartup -PsmokeJava=<PCL同款Java> --offline --console=plain --no-daemon` 成功：73 秒，27 项任务（17 执行、10 复用）。
+
+实际执行通过：Forge 登记、桥接、Java 退出、既有目标守卫回归、新增绘制完成/兜底状态、换世界与卸载、加载器身份隔离/元数据复用/晚到定义检查；凭据检查使用合成账户与 build 目录内文件，覆盖用户 DPAPI、无明文、旧密码退役、轮换、账户绑定、损坏与忘记、并发写锁，无网络。`checkNativeShutdown` 正常、调用超时与引用读者超时三场景通过；`checkNativeStartup` 在独立 PCL 同款 JVM 加载生产 DLL，通过包绑定、自身基线、并发回调、线程保护、320 个 JVMTI 环境及关闭，进程退出码 0。标准 test 任务无测试源，实际回归由上述 check 任务执行。
+
+最终包 `build/libs/Secret-4.3-local-test-r19.jar`：**1,520,308 字节**，**89 个业务类**及既有模块描述；SHA-256：`7093E0CD56B4B644DEC2D15EE162B0E53467F603D95EE67DAE9864B97CC3F659`。无测试类、测试 DLL、验证脚本或日志。已安装 r17-fix1 摘要未变，原有未跟踪 CFR 文件保留。
+
+静态上移除了重复绘制、无用矩阵分配和重复类资源解析，但本轮没有启动 Minecraft、测量 FPS 或验证真实 GL/换维度画面；不将模型检查等同于实机通过。未部署、未提交或推送。
+
+
+## r20 Java 缺口修补（2026-11-06）
+
+以 r19 未提交工作区为基线，起止 HEAD 均为 `a8b0bef`；保留既有修改与未跟踪 CFR 文件。仅修改既有 Java、版本、检查和本文；Native 生产源码的完整 Git 差异摘要与起始值一致。r13 攻击/挥击文件 SHA-256 仍为 `05F0CA04266AA07F7B38487908EE880F057CDB586D40531BF9049D3DC843974F`。
+
+- **Owner 运动**：登记时只采集合法标量；维护时要求绑定仍有效、同世界、非正常生命周期且非死亡处决。补齐两组旧坐标的非有限值，以及空、非有限或反向碰撞箱；只修复非法分量，异常碰撞箱按当前姿态尺寸重建。合法插值、碰撞箱对象和体型保持不变，无新增正常路径集合分配、会话鉴权或锁。
+- **事件异常**：普通分派失败时只补跑 Tick END、世界卸载和实体离界的既有维护；失败登录/Clone/渲染不补发成功处理。保留 Forge 异常处理器及首个异常，次生异常附加，VirtualMachineError/ThreadDeath 直接抛出。正常分派顺序与取消状态保持原行为。
+- **动态桥接**：删除生成类公开 bind 入口，不再接纳同名预加载类；现有安装器核对实际 Class/加载器、句柄来源与类型，以私有 volatile 数组完整发布两个句柄。重复安装复用本次 Class，绑定槽被替换明确报错；两个 post 描述符不变。该修改不等于防住任意反射/Unsafe 字段篡改，动态类 SourceShield 保护仍属后续 Native 范围。
+- **节区与界面**：EntitySection.add 统一使用现有实例/同维度 UUID 拒签规则，保留 Owner、Secret 及正常新召唤。Owner 死亡界面守卫放在既有 DeathExecutionHooks，避免公共 OwnerSafetyHooks 的方法表新增客户端类型；只阻止有效 Owner 被强塞原版死亡界面，保留处决、普通菜单和正常生命周期。EntitySection 与客户端 Minecraft 加入一次定向重转换，新入口加入必检审计；不修改 r13 文件或恢复全 JVM 扫描。
+- **监听器清理边界**：处决线程只查原始注册键 `key == target`，仅摘除可确认独占且按对象身份比较的分派监听器；共享回调、自定义相等语义与变化中的登记不猜测。Forge 对象索引依赖 Entity.equals/hashCode，空索引键本批保留并报告 partial，沿用原三次有界重试；因此可能仍保留目标引用，不能称为完全释放或完整断根。没有清空目标字段，也不扫描 Lambda 捕获、共享任务池或在 EventBus.post 添加清理扫描。
+- **补画**：FOV 改为初始化时解析的 MethodHandle.invokeExact，保持实际 GameRenderer/Camera/float/boolean → double 签名和失败补画语义；r19 去重与 GL 状态恢复保留。
+
+新增及既有 Java 回归通过：异常旧坐标、空/反向/非有限碰撞箱与合法对象保留；生命周期、异世界、失效绑定及死亡优先；事件首因/次生异常、致命异常、正常取消、维护事件选择；私有完整绑定、错误句柄、重复安装及同名定义冲突；节区同 UUID 新 ID、正常新 UUID、跨维度与 Owner/FakePlayer/Secret 分流；真实方法织入、Owner 界面与原死亡行为、同 ID 不同对象的监听器隔离及共享回调保留；FOV 实际目标类型、既有渲染/层级缓存检查。模型未执行真实 OpenGL 绘制。
+
+首次完整构建实际编译 Java 和配套 r20 Native DLL，并实际执行 Native 退出正常、调用超时、引用读者超时三场景，均通过。新增夹具先后修正普通 JVM 缺少 Forge 事件父类准备、重复使用同一事件实例导致阶段冲突；没有修改生产断言或削弱保护。一次定点重跑被 ForgeGradle 联网证书预检阻断，独立 HTTPS 检查正常后，仅离线构建命令增加 `-Dnet.minecraftforge.gradle.check.certs=false`；始终保留 `--offline` 使用缓存，未修改工程/生产 TLS 设置。
+
+最终 `.work/r20-final-build2.log`：`build checkNativeStartup -PsmokeJava=<PCL同款Java> --offline --console=plain --no-daemon`（含上述单次预检参数）成功，26 秒，27 项任务（13 执行、14 复用）。最终 Java 重编，Native 复用本批已生成 DLL；Native 退出模型和凭据检查复用本批已通过结果。生产 DLL 在独立 JVM 实际完成包绑定、84 个认证业务类、SourceShield、并发回调、线程保护、320 环境链和安全关闭，ExitCode=0。标准 test 无源，实际回归来自 check 任务。测试总线 shutdown 输出的 FATAL 栈是 Forge 自带诊断，两个模型总线均按预期关闭，不是游戏崩溃。
+
+最终 JAR **1,528,306 字节**，**89 个业务类**及既有模块描述；SHA-256：`907BFB8A413A6345162EEB3DD4592D505AC9EF8B10964813A08D74A78888472C`。无测试类、测试 DLL、脚本或日志入包，安装目录 r17-fix1 摘要未变。源码静态上减少了补画反射装箱，新增正常检查有有限分支/查询成本；没有进行 FPS、真实攻防、界面操作或保存退出实机验收。本轮未部署、未启动 Minecraft、未提交推送。

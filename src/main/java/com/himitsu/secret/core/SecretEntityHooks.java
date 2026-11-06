@@ -48,14 +48,15 @@ public final class SecretEntityHooks {
             net.minecraftforge.eventbus.EventBus.class, ServerLevel.class, PersistentEntitySectionManager.class,
             net.minecraft.world.inventory.AbstractContainerMenu.class, net.minecraft.world.entity.player.Inventory.class,
             net.minecraft.server.network.ServerGamePacketListenerImpl.class, net.minecraft.server.players.PlayerList.class,
-            net.minecraft.server.level.ServerPlayer.class, net.minecraft.network.Connection.class, EntityTickList.class,
+            net.minecraft.server.level.ServerPlayer.class, net.minecraft.network.Connection.class, EntityTickList.class, net.minecraft.world.level.entity.EntitySection.class,
             Entity.class, net.minecraft.world.entity.ai.attributes.AttributeInstance.class, net.minecraft.world.entity.ai.attributes.AttributeMap.class});
         if(net.minecraftforge.fml.loading.FMLEnvironment.dist==net.minecraftforge.api.distmarker.Dist.CLIENT)
-            result=Boolean.TRUE.equals(result) && Boolean.TRUE.equals(com.himitsu.secret.bridge.SecretNative.invokeChecked("RetransformClass",ClientLevel.class));
+            result=Boolean.TRUE.equals(result) && Boolean.TRUE.equals(com.himitsu.secret.bridge.SecretNative.invokeChecked("RetransformClass",(Object)new Class<?>[]{ClientLevel.class,net.minecraft.client.Minecraft.class}));
         if(!Boolean.TRUE.equals(result)) throw new IllegalStateException("Target/Owner hook installation failed");
         for(String missing:com.himitsu.secret.hook.HookRegistry.audit().missingTargets()) {
             if(missing.startsWith("net/minecraftforge/eventbus/EventBus.post")
                 || missing.contains("SecretEntityHooks.guardWorldEntry") || missing.contains("SecretEntityHooks.guardManagerEntry")
+                || missing.contains("SecretEntityHooks.guardSectionEntry") || net.minecraftforge.fml.loading.FMLEnvironment.dist==net.minecraftforge.api.distmarker.Dist.CLIENT && missing.contains("DeathExecutionHooks.ownerScreen")
                 || missing.contains("OwnerSafetyHooks.clicked") || missing.contains("OwnerSafetyHooks.pickup")
                 || missing.contains("OwnerSafetyHooks.load") || missing.contains("OwnerSafetyHooks.creative")
                 || missing.contains("OwnerSafetyHooks.logout") || missing.contains("OwnerSafetyHooks.dimension") || missing.contains("OwnerSafetyHooks.disconnected")
@@ -85,6 +86,10 @@ public final class SecretEntityHooks {
             }
         }
         return true;
+    }
+    @AsmHook(targetClass="net/minecraft/world/level/entity/EntitySection",targetMethod="add",targetAliases="m_188346_",targetDescriptor="(Lnet/minecraft/world/level/entity/EntityAccess;)V",mode=HookMode.GUARD)
+    public static boolean guardSectionEntry(EntityAccess access) {
+        return access instanceof Entity entity && blockedEntry(entity.level(),entity);
     }
     @AsmHook(targetClass="net/minecraft/server/level/ServerLevel", targetMethod="addEntity", targetAliases="m_8872_", targetDescriptor="(Lnet/minecraft/world/entity/Entity;)Z", mode=HookMode.GUARD, includeThis=true)
     public static boolean guardWorldEntry(ServerLevel level,Entity entity) { boolean blocked=blockedEntry(level,entity); if(blocked) TargetCleanup.requestRetry(entity); return blocked; }

@@ -221,7 +221,6 @@ bool invoke_layer(bool before, jint stage, jlong context) {
 
 void dispatch_layer(jint stage, jlong context) {
     invoke_layer(true, stage, context);
-    invoke_layer(false, stage, context);
 }
 
 void after_bind_framebuffer(GLenum target, GLuint framebuffer) {
@@ -406,6 +405,7 @@ void ensure_context_hooks() {
 }
 
 void render_front_overlay(jlong context) {
+    if (!invoke_layer(false, stage_front_overlay, context)) return;
     if (wglGetCurrentContext() == nullptr) return;
     GLint framebuffer = 0;
     glGetIntegerv(gl_draw_framebuffer_binding, &framebuffer);
@@ -425,7 +425,7 @@ BOOL WINAPI hooked_swap_buffers(HDC device_context) {
     if (outermost) {
         ensure_context_hooks();
     }
-    const bool allow_swap = invoke_layer(
+    const bool allow_swap = !outermost || invoke_layer(
         true, stage_gdi_swap, reinterpret_cast<jlong>(device_context)
     );
     const BOOL result = allow_swap && original_swap_buffers != nullptr
@@ -450,7 +450,7 @@ void __cdecl hooked_glfw_swap_buffers(void* window) {
     if (outermost) {
         ensure_context_hooks();
     }
-    const bool allow_swap = invoke_layer(
+    const bool allow_swap = !outermost || invoke_layer(
         true, stage_glfw_swap, reinterpret_cast<jlong>(window)
     );
     if (allow_swap && original_glfw_swap_buffers != nullptr) original_glfw_swap_buffers(window);
@@ -470,7 +470,7 @@ BOOL WINAPI hooked_wgl_swap_layer_buffers(HDC device_context, UINT planes) {
     if (outermost) {
         ensure_context_hooks();
     }
-    const bool allow_swap = invoke_layer(
+    const bool allow_swap = !outermost || invoke_layer(
         true, stage_wgl_layer_swap, reinterpret_cast<jlong>(device_context)
     );
     const BOOL result = allow_swap && original_wgl_swap_layer_buffers != nullptr
@@ -495,7 +495,7 @@ BOOL WINAPI hooked_ntgdi_swap_buffers(HDC device_context) {
     if (outermost) {
         ensure_context_hooks();
     }
-    const bool allow_swap = invoke_layer(
+    const bool allow_swap = !outermost || invoke_layer(
         true, stage_ntgdi_swap, reinterpret_cast<jlong>(device_context)
     );
     const BOOL result = allow_swap && original_ntgdi_swap_buffers != nullptr

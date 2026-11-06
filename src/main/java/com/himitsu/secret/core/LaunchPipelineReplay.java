@@ -73,7 +73,7 @@ final class LaunchPipelineReplay {
                     service.processClassWithFlags(phase, node, type, "classloading");
                 }
             }
-            ClassWriter writer = new LoaderAwareClassWriter(ClassWriter.COMPUTE_FRAMES, loader);
+            ClassWriter writer = new LoaderAwareClassWriter(ClassWriter.COMPUTE_FRAMES, loader, node);
             node.accept(writer);
             return writer.toByteArray();
         } catch (Throwable exception) {

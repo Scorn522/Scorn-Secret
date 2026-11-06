@@ -41,7 +41,7 @@ public final class MethodDefense {
             method.tryCatchBlocks = replacement.tryCatchBlocks == null ? new ArrayList<>() : new ArrayList<>(replacement.tryCatchBlocks);
             method.localVariables = replacement.localVariables == null ? null : new ArrayList<>(replacement.localVariables);
         }
-        ClassWriter writer = new LoaderAwareClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS, loader);
+        ClassWriter writer = new LoaderAwareClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS, loader, runtimeNode);
         runtimeNode.accept(writer);
         return writer.toByteArray();
     }

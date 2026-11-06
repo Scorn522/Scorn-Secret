@@ -13,47 +13,44 @@ import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
 import com.mojang.blaze3d.vertex.VertexSorting;
-import java.lang.reflect.Method;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraftforge.fml.util.ObfuscationReflectionHelper;
 
 public final class SecretManualRenderer {
     private static final MultiBufferSource.BufferSource BUFFERS = MultiBufferSource.immediate(new BufferBuilder(256));
-    private static final ThreadLocal<SecretAvatarProxy> FRAME_ENTITY = new ThreadLocal<>();
-    private static final Method GET_FOV = ObfuscationReflectionHelper.findMethod(
-        GameRenderer.class, "m_109141_", Camera.class, float.class, boolean.class
-    );
+    private static final MethodHandle GET_FOV = fovHandle();
+    private static MethodHandle fovHandle() {
+        try { return MethodHandles.lookup().unreflect(ObfuscationReflectionHelper.findMethod(
+            GameRenderer.class,"m_109141_",Camera.class,float.class,boolean.class)); }
+        catch(IllegalAccessException failure) { throw new ExceptionInInitializerError(failure); }
+    }
 
     private SecretManualRenderer() {
     }
 
-    public static void renderBeforeSwap(boolean advanceFrame) {
+    public static boolean renderBeforeSwap() {
+        if (!RenderSystem.isOnRenderThread()) return false;
         Minecraft minecraft = Minecraft.getInstance();
+        if(minecraft.level==null) return false;
         float partialTick = minecraft.getFrameTime();
-        SecretAvatarProxy entity = FRAME_ENTITY.get();
-        if (advanceFrame || entity == null) {
-            entity = SecretAvatarManager.update(partialTick);
-            if (entity != null) FRAME_ENTITY.set(entity);
-        }
+        // AvatarManager already deduplicates updates within this game frame.
+        SecretAvatarProxy entity = SecretAvatarManager.update(partialTick);
         SecretEntityRenderer renderer = SecretEntityRenderer.instance();
-        if (entity == null || renderer == null) {
-            return;
-        }
-        if (!RenderSystem.isOnRenderThread()) {
-            return;
-        }
+        if(entity==null || entity.level()!=minecraft.level || renderer==null) return false;
 
         Vec3 position = entity.position();
         Camera mainCamera = minecraft.gameRenderer.getMainCamera();
         Vec3 camera = mainCamera.getPosition();
         Matrix4f worldProjection;
         try {
-            double fov = (double) GET_FOV.invoke(
+            double fov = (double) GET_FOV.invokeExact(
                 minecraft.gameRenderer, mainCamera, minecraft.getFrameTime(), true
             );
             worldProjection = minecraft.gameRenderer.getProjectionMatrix(fov);
-        } catch (ReflectiveOperationException exception) {
-            return;
+        } catch (Throwable exception) {
+            return false;
         }
         VertexSorting worldSorting = RenderSystem.getVertexSorting();
         PoseStack poseStack = new PoseStack();
@@ -72,17 +69,16 @@ public final class SecretManualRenderer {
             poseStack.translate(position.x - camera.x, position.y - camera.y, position.z - camera.z);
             renderer.render(entity, entity.yBodyRot, partialTick, poseStack, BUFFERS, LightTexture.FULL_BRIGHT);
         } finally {
-            BUFFERS.endBatch();
+            try { BUFFERS.endBatch(); }
+            finally {
             RenderSystem.depthMask(true);
             RenderSystem.enableDepthTest();
             RenderSystem.setProjectionMatrix(previousProjection, previousSorting);
             RenderSystem.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
             RenderSystem.disableBlend();
+            }
         }
-    }
-
-    public static void endFrame() {
-        FRAME_ENTITY.remove();
+        return true;
     }
 
 }

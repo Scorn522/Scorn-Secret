@@ -96,8 +96,16 @@ public final class TargetGuardCheck {
             deaths.set(null,parse.invoke(null,Set.of("minecraft:overworld|"+retired+"|12")));
             check(TargetLedger.blockedUuid(level,retired),"same-dimension retired UUID was admitted");
             check(!TargetLedger.blockedUuid(level,UUID.randomUUID()),"new UUID was blocked");
+            var revived=(EntityFixture)unsafe.allocateInstance(EntityFixture.class);revived.uuid=retired;revived.id=444;
+            set(revived,net.minecraft.world.entity.Entity.class,"level",level);
+            check(!TargetLedger.marked(revived)&&SecretEntityHooks.guardSectionEntry(revived),"section admitted a new ID for the retired UUID");
+            revived.uuid=UUID.randomUUID();check(!SecretEntityHooks.guardSectionEntry(revived),"section blocked a new UUID");
+            revived.uuid=retired;
+            var secret=(SecretFixture)unsafe.allocateInstance(SecretFixture.class);secret.uuid=retired;set(secret,net.minecraft.world.entity.Entity.class,"level",level);
+            check(!SecretEntityHooks.guardSectionEntry(secret),"section blocked Secret entity");
             set(level,net.minecraft.world.level.Level.class,"dimension",net.minecraft.world.level.Level.NETHER);
             check(!TargetLedger.blockedUuid(level,retired),"UUID exclusion leaked into another dimension");
+            check(!SecretEntityHooks.guardSectionEntry(revived),"section UUID guard leaked into another dimension");
         } finally { deaths.set(null,oldDeaths); set(level,net.minecraft.world.level.Level.class,"dimension",net.minecraft.world.level.Level.OVERWORLD); }
         EntityFixture root=(EntityFixture)unsafe.allocateInstance(EntityFixture.class);
         PartFixture first=(PartFixture)unsafe.allocateInstance(PartFixture.class), second=(PartFixture)unsafe.allocateInstance(PartFixture.class);
@@ -150,6 +158,7 @@ public final class TargetGuardCheck {
                 deaths.set(null,parse.invoke(null,Set.of("minecraft:overworld|"+id+"|222")));
                 check(SecretEntityHooks.blockedEntry(level,fake),"fake reused Owner UUID was admitted");
                 check(!SecretEntityHooks.blockedEntry(level,player),"fake UUID execution blocked the bound Owner");
+                check(SecretEntityHooks.guardSectionEntry(fake)&&!SecretEntityHooks.guardSectionEntry(player),"section guard lost FakePlayer/Owner split");
                 OwnerSafety.lifecycle(player,true,true);
                 try { check(!SecretEntityHooks.blockedEntry(level,player),"legitimate Owner dimension transition was blocked"); }
                 finally { OwnerSafety.lifecycle(player,false,false); set(binding,bindingType,"active",true); owners.set(null,published); }
@@ -279,16 +288,18 @@ public final class TargetGuardCheck {
         set(binding,binding.getClass(),"owner",true);
         var map=new net.minecraft.world.entity.ai.attributes.AttributeMap(net.minecraft.world.entity.ai.attributes.AttributeSupplier.builder().add(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH).build());
         var attribute=map.getInstance(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH);
-        var motion=binding.getClass().getDeclaredMethod("motion");motion.setAccessible(true);
+        var motion=binding.getClass().getDeclaredMethod("motion",boolean.class);motion.setAccessible(true);
         var stablePosition=new net.minecraft.world.phys.Vec3(4,60,8);
         var stableVelocity=new net.minecraft.world.phys.Vec3(0.5,0.25,-0.5);
         set(player,net.minecraft.world.entity.Entity.class,"position",stablePosition);
-        player.setDeltaMovement(stableVelocity);motion.invoke(binding);
+        player.entityData.define(net.minecraft.world.entity.Entity.DATA_POSE,net.minecraft.world.entity.Pose.STANDING);
+        player.setBoundingBox(new net.minecraft.world.phys.AABB(3,60,7,5,63,9));
+        player.setDeltaMovement(stableVelocity);motion.invoke(binding,true);
         player.setDeltaMovement(new net.minecraft.world.phys.Vec3(Double.NaN,Double.POSITIVE_INFINITY,0));
-        motion.invoke(binding);
+        motion.invoke(binding,true);
         check(player.getDeltaMovement().equals(stableVelocity),"Owner raw velocity corruption was not repaired");
         var legitimateVelocity=new net.minecraft.world.phys.Vec3(-2,3,4);
-        player.setDeltaMovement(legitimateVelocity);motion.invoke(binding);
+        player.setDeltaMovement(legitimateVelocity);motion.invoke(binding,true);
         check(player.position()==stablePosition && player.getDeltaMovement()==legitimateVelocity,"normal motion was copied or changed");
         Field known=binding.getClass().getDeclaredField("positionKnown");known.setAccessible(true);
         check(known.getBoolean(binding),"finite position was not recorded");
@@ -299,10 +310,11 @@ public final class TargetGuardCheck {
         boolean added=player.isAddedToWorld;player.isAddedToWorld=false;
         try {
             set(player,net.minecraft.world.entity.Entity.class,"position",new net.minecraft.world.phys.Vec3(Double.NaN,60,8));
-            motion.invoke(binding);
+            motion.invoke(binding,true);
             check(player.position().equals(stablePosition) && Double.isFinite(player.getBoundingBox().minX),"Owner raw position corruption was not repaired");
-            set(player,net.minecraft.world.entity.Entity.class,"position",null);motion.invoke(binding);
+            set(player,net.minecraft.world.entity.Entity.class,"position",null);motion.invoke(binding,true);
             check(player.position().equals(stablePosition) && player.blockPosition.equals(net.minecraft.core.BlockPos.containing(stablePosition)),"null position lost the trusted position or block index");
+            checkR20Motion(unsafe,player,binding,motion,level);
         } finally {player.isAddedToWorld=added;}
 
         Field attributeIndex=OwnerSafety.class.getDeclaredField("attributeOwners"); attributeIndex.setAccessible(true);
@@ -373,6 +385,204 @@ public final class TargetGuardCheck {
         check(manager.sectionStorage.getSection(section)==null&&SecretEntityRegistry.instance(level)==null,"unloaded world was resurrected");
         TargetLedger.clearLevel(level);
     }
+    private static void checkR20Motion(sun.misc.Unsafe unsafe,net.minecraft.server.level.ServerPlayer player,Object binding,
+            Method motion,net.minecraft.server.level.ServerLevel level) throws Exception {
+        var normal=new net.minecraft.world.phys.AABB(-2,30,-4,6,38,8);player.setBoundingBox(normal);
+        player.xo=2;player.yo=59;player.zo=7;player.xOld=1;player.yOld=58;player.zOld=6;
+        motion.invoke(binding,true);
+        check(player.getBoundingBox()==normal && player.xo==2 && player.xOld==1,"legal custom box/interpolation changed");
+        player.xo=Double.NaN;player.yo=Double.NEGATIVE_INFINITY;player.zo=Double.POSITIVE_INFINITY;
+        player.xOld=Double.NaN;player.yOld=Double.POSITIVE_INFINITY;player.zOld=Double.NEGATIVE_INFINITY;
+        player.setBoundingBox(null);motion.invoke(binding,false);
+        check(Double.isNaN(player.xo) && player.getBoundingBox()==null,"pre-binding capture repaired unauthenticated state");
+        motion.invoke(binding,true);
+        check(player.xo==4 && player.yo==60 && player.zo==8 && player.xOld==4 && player.yOld==60 && player.zOld==8,"invalid interpolation not repaired");
+        var expected=player.getDimensions(player.getPose()).makeBoundingBox(4,60,8);
+        check(player.getBoundingBox().equals(expected),"null box did not use current pose dimensions");
+        var broken=new net.minecraft.world.phys.AABB(0,0,0,1,1,1);
+        set(broken,net.minecraft.world.phys.AABB.class,"minX",2.0D);player.setBoundingBox(broken);motion.invoke(binding,true);
+        check(player.getBoundingBox().equals(expected),"reversed box was kept");
+        player.setBoundingBox(new net.minecraft.world.phys.AABB(Double.NaN,0,0,1,Double.POSITIVE_INFINITY,1));motion.invoke(binding,true);
+        check(player.getBoundingBox().equals(expected),"non-finite box was kept");
+        player.xo=Double.NaN;OwnerSafety.access(player,2,true);
+        try {OwnerSafety.maintainWeapon(player);check(Double.isNaN(player.xo),"lifecycle interpolation was changed");}
+        finally {OwnerSafety.access(player,2,false);}
+        set(binding,binding.getClass(),"active",false);OwnerSafety.maintainWeapon(player);
+        check(Double.isNaN(player.xo),"inactive binding repaired motion");set(binding,binding.getClass(),"active",true);
+        var other=(net.minecraft.server.level.ServerLevel)unsafe.allocateInstance(net.minecraft.server.level.ServerLevel.class);
+        set(player,net.minecraft.world.entity.Entity.class,"level",other);OwnerSafety.maintainWeapon(player);
+        check(Double.isNaN(player.xo),"old-world binding repaired new-world motion");set(player,net.minecraft.world.entity.Entity.class,"level",level);
+        Field marks=DeathExecution.class.getDeclaredField("MARKED_OBJECTS");marks.setAccessible(true);Object prior=marks.get(null);
+        try {
+            var marked=new IdentityHashMap<net.minecraft.world.entity.player.Player,int[]>();marked.put(player,new int[2]);marks.set(null,marked);
+            OwnerSafety.maintainWeapon(player);check(Double.isNaN(player.xo),"Owner repair overrode death priority");
+        } finally {marks.set(null,prior);}
+        motion.invoke(binding,true);
+    }
+    private static void checkR20Screens(sun.misc.Unsafe unsafe) throws Exception {
+        var level=(net.minecraft.client.multiplayer.ClientLevel)unsafe.allocateInstance(net.minecraft.client.multiplayer.ClientLevel.class);
+        set(level,net.minecraft.world.level.Level.class,"dimension",net.minecraft.world.level.Level.OVERWORLD);
+        var player=(net.minecraft.client.player.LocalPlayer)unsafe.allocateInstance(net.minecraft.client.player.LocalPlayer.class);
+        player.uuid=UUID.randomUUID();set(player,net.minecraft.world.entity.Entity.class,"level",level);
+        var minecraft=(net.minecraft.client.Minecraft)unsafe.allocateInstance(net.minecraft.client.Minecraft.class);minecraft.player=player;minecraft.level=level;
+        var screen=(net.minecraft.client.gui.screens.DeathScreen)unsafe.allocateInstance(net.minecraft.client.gui.screens.DeathScreen.class);
+        var menu=(net.minecraft.client.gui.screens.PauseScreen)unsafe.allocateInstance(net.minecraft.client.gui.screens.PauseScreen.class);
+        Field owners=OwnerSafety.class.getDeclaredField("owners");owners.setAccessible(true);Object old=owners.get(null);
+        Field active=DeathExecution.class.getDeclaredField("clientActive");active.setAccessible(true);boolean before=active.getBoolean(null);
+        Class<?> type=Arrays.stream(OwnerSafety.class.getDeclaredClasses()).filter(c->c.getSimpleName().equals("Binding")).findFirst().orElseThrow();
+        Object binding=unsafe.allocateInstance(type);set(binding,type,"player",player);set(binding,type,"level",level);set(binding,type,"active",true);set(binding,type,"owner",true);
+        var map=new IdentityHashMap<net.minecraft.world.entity.player.Player,Object>();map.put(player,binding);
+        try {
+            owners.set(null,map);active.setBoolean(null,false);
+            check(DeathExecutionHooks.ownerScreen(minecraft,screen),"Owner death screen accepted");
+            check(!DeathExecutionHooks.ownerScreen(minecraft,menu)&&!DeathExecutionHooks.ownerScreen(minecraft,null),"ordinary menu or close blocked");
+            OwnerSafety.access(player,2,true);
+            try {check(!DeathExecutionHooks.ownerScreen(minecraft,screen),"lifecycle screen blocked");}finally {OwnerSafety.access(player,2,false);}
+            active.setBoolean(null,true);check(!DeathExecutionHooks.ownerScreen(minecraft,screen),"Owner shield displaced death execution");
+            check(DeathExecutionHooks.guardSetScreen(minecraft,menu)&&DeathExecutionHooks.guardForceSetScreen(minecraft,menu),"existing death screen guard changed");
+            active.setBoolean(null,false);minecraft.level=null;
+            check(!DeathExecutionHooks.ownerScreen(minecraft,screen),"unloaded-world screen blocked");minecraft.level=level;
+            set(binding,type,"active",false);check(!DeathExecutionHooks.ownerScreen(minecraft,screen),"disconnected Owner retained screen shield");
+        } finally {owners.set(null,old);active.setBoolean(null,before);}
+    }
+    public static final class CancelEvent extends net.minecraftforge.eventbus.api.Event { public boolean isCancelable() {return true;} }
+    private static net.minecraftforge.eventbus.ListenerList eventList(Class<?> type) throws Exception {
+        Class<?> parent=type.getSuperclass();if(parent!=null && net.minecraftforge.eventbus.api.Event.class.isAssignableFrom(parent)) eventList(parent);
+        var method=net.minecraftforge.eventbus.api.EventListenerHelper.class.getDeclaredMethod("getListenerListInternal",Class.class,boolean.class);
+        method.setAccessible(true);return (net.minecraftforge.eventbus.ListenerList)method.invoke(null,type,true);
+    }
+    private static void checkR20Events() throws Exception {
+        Field hf=EventBusTakeover.class.getDeclaredField("HANDLERS");hf.setAccessible(true);List handlers=(List)hf.get(null);List saved=new ArrayList(handlers);
+        var handler=Arrays.stream(EventBusTakeover.class.getDeclaredClasses()).filter(c->c.getSimpleName().equals("Handler")).findFirst().orElseThrow().getDeclaredConstructor(Class.class,java.util.function.Consumer.class);handler.setAccessible(true);
+        Field uf=sun.misc.Unsafe.class.getDeclaredField("theUnsafe");uf.setAccessible(true);var unsafe=(sun.misc.Unsafe)uf.get(null);
+        var level=(net.minecraft.server.level.ServerLevel)unsafe.allocateInstance(net.minecraft.server.level.ServerLevel.class);
+        var entity=(EntityFixture)unsafe.allocateInstance(EntityFixture.class);set(entity,net.minecraft.world.entity.Entity.class,"level",level);
+        int[] ordinary={0},secret={0},reported={0};Throwable[] fail={null},reportFail={null},secretFail={null};
+        var bus=(net.minecraftforge.eventbus.EventBus)net.minecraftforge.eventbus.api.BusBuilder.builder().setExceptionHandler((b,e,ls,index,t)->{
+            reported[0]++;if(reportFail[0]!=null) throwFailure(reportFail[0]);
+        }).build();
+        var events=List.of(new net.minecraftforge.event.TickEvent.ClientTickEvent(net.minecraftforge.event.TickEvent.Phase.END),
+            new net.minecraftforge.event.TickEvent.LevelTickEvent(net.minecraftforge.fml.LogicalSide.SERVER,net.minecraftforge.event.TickEvent.Phase.END,level,()->true),
+            new net.minecraftforge.event.level.LevelEvent.Unload(level),new net.minecraftforge.event.entity.EntityLeaveLevelEvent(entity,level),
+            new net.minecraftforge.event.TickEvent.ClientTickEvent(net.minecraftforge.event.TickEvent.Phase.START),
+            new net.minecraftforge.event.entity.player.PlayerEvent.PlayerLoggedInEvent(null));
+        try {
+            handlers.clear();
+            for(var event:events) {
+                Class type=event.getClass();eventList(type);
+                if(type==net.minecraftforge.event.TickEvent.ClientTickEvent.class && event==events.get(4))continue;
+                bus.addListener(net.minecraftforge.eventbus.api.EventPriority.NORMAL,false,type,(java.util.function.Consumer<net.minecraftforge.eventbus.api.Event>)e->{ordinary[0]++;if(fail[0]!=null)throwFailure(fail[0]);});
+                handlers.add(handler.newInstance(type,(java.util.function.Consumer<net.minecraftforge.eventbus.api.Event>)e->{secret[0]++;if(secretFail[0]!=null)throwFailure(secretFail[0]);}));
+            }
+            for(int i=0;i<events.size();i++) {
+                var event=events.get(i);fail[0]=new IllegalStateException("ordinary");int count=secret[0];
+                try {EventBusTakeover.post(bus,event);throw new AssertionError("ordinary failure swallowed");}catch(IllegalStateException expected){check(expected==fail[0],"original failure replaced");}
+                check(secret[0]==count+(i<4?1:0),"wrong exceptional event maintenance: "+event.getClass()+"/"+i);
+            }
+            fail[0]=new IllegalStateException("primary");reportFail[0]=new IllegalArgumentException("handler");secretFail[0]=new AssertionError("maintenance");
+            try {EventBusTakeover.post(bus,new net.minecraftforge.event.TickEvent.ClientTickEvent(net.minecraftforge.event.TickEvent.Phase.END));throw new AssertionError("missing combined failure");}catch(IllegalStateException expected){check(expected==fail[0]&&expected.getSuppressed().length==2,"secondary failures lost primary");}
+            reportFail[0]=null;secretFail[0]=null;
+            for(Throwable fatal:List.of(new OutOfMemoryError("fixture"),new ThreadDeath())) {
+                fail[0]=fatal;int count=secret[0],reports=reported[0];
+                try {EventBusTakeover.post(bus,new net.minecraftforge.event.TickEvent.ClientTickEvent(net.minecraftforge.event.TickEvent.Phase.END));throw new AssertionError("fatal swallowed");}catch(Throwable expected){check(expected==fatal,"fatal changed");}
+                check(secret[0]==count&&reported[0]==reports,"fatal triggered extra work");
+            }
+            fail[0]=null;int count=secret[0];check(!EventBusTakeover.post(bus,new net.minecraftforge.event.TickEvent.ClientTickEvent(net.minecraftforge.event.TickEvent.Phase.END))&&secret[0]==count+1,"normal dispatch changed");
+            eventList(CancelEvent.class);bus.addListener(net.minecraftforge.eventbus.api.EventPriority.NORMAL,false,CancelEvent.class,e->e.setCanceled(true));
+            check(EventBusTakeover.post(bus,new CancelEvent()),"cancellation state lost");
+            checkR20Bridge(bus);
+            checkR20Listeners(unsafe);
+            checkR20Screens(unsafe);
+        } finally {handlers.clear();handlers.addAll(saved);bus.shutdown();}
+        System.out.println("JAVA_HARDENING_PASS event_primary_suppressed_fatal maintenance_only bridge_private_atomic identity_listener_partial owner_screen MODEL_NO_GAME");
+    }
+    private static <T extends Throwable> void throwFailure(Throwable failure) throws T {throw (T)failure;}
+    private static void checkR20Bridge(net.minecraftforge.eventbus.EventBus bus) throws Exception {
+        Method bytes=EventBusBridge.class.getDeclaredMethod("bytes");bytes.setAccessible(true);byte[] image=(byte[])bytes.invoke(null);
+        class BridgeLoader extends ClassLoader { Class<?> define() {return defineClass(EventBusBridge.INTERNAL_NAME.replace('/','.'),image,0,image.length);} }
+        var loader=new BridgeLoader();Class<?> bridge=loader.define();
+        try {loader.define();throw new AssertionError("same-name bridge reused");}catch(LinkageError expected){}
+        check(Arrays.stream(bridge.getDeclaredMethods()).noneMatch(m->m.getName().equals("bind")),"public bridge bind survived");
+        var slot=bridge.getDeclaredField("handlers");slot.setAccessible(true);
+        check(slot.getModifiers()==(Modifier.PRIVATE|Modifier.STATIC|Modifier.VOLATILE),"bridge publication not private volatile");
+        Method post=bridge.getMethod("post",net.minecraftforge.eventbus.EventBus.class,net.minecraftforge.eventbus.api.Event.class);
+        try {post.invoke(null,bus,new CancelEvent());throw new AssertionError("unbound bridge callable");}catch(InvocationTargetException expected){check(expected.getCause() instanceof IllegalStateException,"unbound bridge failure unclear");}
+        var lookup=java.lang.invoke.MethodHandles.lookup();
+        var simple=lookup.findStatic(EventBusTakeover.class,"post",java.lang.invoke.MethodType.methodType(boolean.class,net.minecraftforge.eventbus.EventBus.class,net.minecraftforge.eventbus.api.Event.class));
+        var dispatched=lookup.findStatic(EventBusTakeover.class,"post",java.lang.invoke.MethodType.methodType(boolean.class,net.minecraftforge.eventbus.EventBus.class,net.minecraftforge.eventbus.api.Event.class,net.minecraftforge.eventbus.api.IEventBusInvokeDispatcher.class));
+        Method publish=EventBusBridge.class.getDeclaredMethod("publish",Class.class,java.lang.invoke.MethodHandle[].class);publish.setAccessible(true);
+        for(var wrong:new java.lang.invoke.MethodHandle[][]{{simple},{simple,null},{dispatched,simple}}) {
+            try {publish.invoke(null,bridge,wrong);throw new AssertionError("bad bridge pair accepted");}catch(InvocationTargetException expected){check(expected.getCause() instanceof IllegalArgumentException,"wrong bridge failure type");}
+            check(slot.get(null)==null,"partial bridge publication");
+        }
+        var pair=new java.lang.invoke.MethodHandle[]{simple,dispatched};publish.invoke(null,bridge,pair);
+        check(slot.get(null)==pair && (boolean)post.invoke(null,bus,new CancelEvent()),"bridge call did not preserve post result");
+        var post3=bridge.getMethod("post",net.minecraftforge.eventbus.EventBus.class,net.minecraftforge.eventbus.api.Event.class,net.minecraftforge.eventbus.api.IEventBusInvokeDispatcher.class);
+        check((boolean)post3.invoke(null,bus,new CancelEvent(),(net.minecraftforge.eventbus.api.IEventBusInvokeDispatcher)net.minecraftforge.eventbus.api.IEventListener::invoke),"dispatcher bridge signature changed");
+        try {publish.invoke(null,bridge,pair);throw new AssertionError("bridge replaced binding");}catch(InvocationTargetException expected){check(expected.getCause() instanceof IllegalStateException,"rebind failure type");}
+        Field installed=EventBusBridge.class.getDeclaredField("installed"),bound=EventBusBridge.class.getDeclaredField("bound");installed.setAccessible(true);bound.setAccessible(true);
+        Object old=installed.get(null),oldBound=bound.get(null);
+        try {
+            installed.set(null,bridge);bound.set(null,pair);
+            try {check(EventBusBridge.defineAndBind()==bridge,"repeat installation redefined bridge");}catch(Throwable error){throw new AssertionError(error);}
+            slot.set(null,pair.clone());try {EventBusBridge.defineAndBind();throw new AssertionError("changed binding accepted");}catch(IllegalStateException expected){}catch(Throwable error){throw new AssertionError(error);}
+        } finally {installed.set(null,old);bound.set(null,oldBound);}
+        var node=new org.objectweb.asm.tree.ClassNode();try(InputStream in=EventBusBridge.class.getResourceAsStream("EventBusBridge.class")){new ClassReader(in).accept(node,0);}
+        for(var method:node.methods)for(var insn:method.instructions)if(insn instanceof org.objectweb.asm.tree.MethodInsnNode call)
+            check(!(call.owner.equals("java/lang/Class")&&call.name.equals("forName")),"foreign same-name bridge adoption survived");
+    }
+    private static void checkR20Listeners(sun.misc.Unsafe unsafe) throws Exception {
+        var bus=(net.minecraftforge.eventbus.EventBus)net.minecraftforge.eventbus.api.BusBuilder.builder().build();
+        Field field=net.minecraftforge.eventbus.EventBus.class.getDeclaredField("listeners");field.setAccessible(true);Map<Object,List<net.minecraftforge.eventbus.api.IEventListener>> index=(Map)field.get(bus);
+        Field idField=net.minecraftforge.eventbus.EventBus.class.getDeclaredField("busID");idField.setAccessible(true);int id=idField.getInt(bus);
+        var list=eventList(CancelEvent.class);int[] counts={0,0};
+        var target=(EntityFixture)unsafe.allocateInstance(EntityFixture.class);target.id=150;
+        var neighbor=(EntityFixture)unsafe.allocateInstance(EntityFixture.class);neighbor.id=151;
+        net.minecraftforge.eventbus.api.IEventListener own=e->counts[0]++,other=e->counts[1]++;
+        var registration=Collections.synchronizedList(new ArrayList<>(List.of(own)));
+        index.put(target,registration);index.put(neighbor,Collections.synchronizedList(new ArrayList<>(List.of(other))));neighbor.id=target.id;
+        list.register(id,bus,net.minecraftforge.eventbus.api.EventPriority.NORMAL,own);list.register(id,bus,net.minecraftforge.eventbus.api.EventPriority.NORMAL,other);
+        check(!EventBusTakeover.detachTarget(bus,target),"ambiguous Entity index deletion reported complete");bus.post(new CancelEvent());
+        check(counts[0]==0&&counts[1]==1&&registration.isEmpty(),"same-ID neighbor listener removed");
+        check(index.entrySet().stream().anyMatch(e->e.getKey()==neighbor),"same-ID neighbor index removed");
+        var absent=(EntityFixture)unsafe.allocateInstance(EntityFixture.class);absent.id=target.id;
+        check(EventBusTakeover.detachTarget(bus,absent),"equal unregistered entity matched target");
+        // Sharing the same callback is not an exclusive target registration.
+        var third=(EntityFixture)unsafe.allocateInstance(EntityFixture.class);third.id=152;net.minecraftforge.eventbus.api.IEventListener shared=e->counts[0]++;
+        registration.add(shared);index.put(third,Collections.synchronizedList(new ArrayList<>(List.of(shared))));list.register(id,bus,net.minecraftforge.eventbus.api.EventPriority.NORMAL,shared);
+        check(!EventBusTakeover.detachTarget(bus,target),"shared callback treated as exclusive");bus.post(new CancelEvent());
+        check(counts[0]==1&&counts[1]==2,"shared callback was removed");
+        bus.shutdown();
+    }
+    private static void checkR20Entrypoints() throws Exception {
+        for(Method method:OwnerSafetyHooks.class.getDeclaredMethods()) for(Class<?> parameter:method.getParameterTypes())
+            check(!parameter.getName().startsWith("net.minecraft.client."),"common Owner hook gained a client-only signature");
+        HookRegistry.register(DeathExecutionHooks.class);
+        for(Method callback:List.of(SecretEntityHooks.class.getMethod("guardSectionEntry",net.minecraft.world.level.entity.EntityAccess.class),
+                DeathExecutionHooks.class.getMethod("ownerScreen",net.minecraft.client.Minecraft.class,net.minecraft.client.gui.screens.Screen.class))) {
+            for(AsmHook annotation:callback.getAnnotationsByType(AsmHook.class)) {
+                HookDefinition hook=HookDefinition.from(annotation,callback);HookRegistry.register(hook);
+                byte[] source;try(InputStream in=TargetGuardCheck.class.getClassLoader().getResourceAsStream(hook.targetClass()+".class")){source=in.readAllBytes();}
+                byte[] transformed=HookTransformer.transform(TargetGuardCheck.class.getClassLoader(),hook.targetClass(),null,null,source);
+                var node=new org.objectweb.asm.tree.ClassNode();new ClassReader(transformed).accept(node,0);
+                var method=node.methods.stream().filter(m->m.name.equals(hook.targetMethod())&&m.desc.equals(hook.targetDescriptor())).findFirst().orElseThrow();
+                check(java.util.Arrays.stream(method.instructions.toArray()).anyMatch(i->i instanceof org.objectweb.asm.tree.MethodInsnNode call&&call.owner.equals(hook.callbackOwner())&&call.name.equals(hook.callbackName())),"new entry guard not woven");
+            }
+        }
+        var node=new org.objectweb.asm.tree.ClassNode();try(InputStream in=TargetGuardCheck.class.getClassLoader().getResourceAsStream("com/himitsu/secret/client/render/SecretManualRenderer.class")){new ClassReader(in).accept(node,0);}
+        check(node.fields.stream().anyMatch(f->f.name.equals("GET_FOV")&&f.desc.equals("Ljava/lang/invoke/MethodHandle;")),"FOV reflection retained");
+        boolean exact=false;
+        for(var method:node.methods)for(var insn:method.instructions)if(insn instanceof org.objectweb.asm.tree.MethodInsnNode call) {
+            check(!(call.owner.equals("java/lang/reflect/Method")&&call.name.equals("invoke")),"FOV still boxes reflective arguments");
+            if(call.owner.equals("java/lang/invoke/MethodHandle")&&call.name.equals("invokeExact")) {
+                check(call.desc.equals("(Lnet/minecraft/client/renderer/GameRenderer;Lnet/minecraft/client/Camera;FZ)D"),"FOV exact signature mismatch");exact=true;
+            }
+        }
+        check(exact,"FOV exact invocation missing");
+        var fov=net.minecraft.client.renderer.GameRenderer.class.getDeclaredMethod("getFov",net.minecraft.client.Camera.class,float.class,boolean.class);fov.setAccessible(true);
+        check(java.lang.invoke.MethodHandles.lookup().unreflect(fov).type().equals(java.lang.invoke.MethodType.methodType(double.class,
+            net.minecraft.client.renderer.GameRenderer.class,net.minecraft.client.Camera.class,float.class,boolean.class)),"actual FOV target type mismatch");
+    }
     private static void checkLeanReads() throws Exception {
         for(Class<?> type:List.of(OwnerSafety.class,CivilizationSurvival.class)) {
             var node=new org.objectweb.asm.tree.ClassNode();
@@ -399,6 +609,61 @@ public final class TargetGuardCheck {
         check(visited.size()==2 && visited.get(0)==first && visited.get(1)==second
             && !ticks.contains(first) && ticks.contains(second) && ticks.contains(third) && ticks.iterated==null,"vanilla iteration/swap semantics changed");
     }
+    private static void checkRenderAndHierarchy() throws Exception {
+        var field=sun.misc.Unsafe.class.getDeclaredField("theUnsafe");field.setAccessible(true);var unsafe=(sun.misc.Unsafe)field.get(null);
+        var first=(net.minecraft.server.level.ServerLevel)unsafe.allocateInstance(net.minecraft.server.level.ServerLevel.class);
+        var second=(net.minecraft.server.level.ServerLevel)unsafe.allocateInstance(net.minecraft.server.level.ServerLevel.class);
+        Class<?> bridge=com.himitsu.secret.client.render.NativeRenderBridge.class;
+        var need=bridge.getDeclaredMethod("needsAvatar",net.minecraft.world.level.Level.class);need.setAccessible(true);
+        var mark=bridge.getDeclaredMethod("markRendered",net.minecraft.world.level.Level.class);mark.setAccessible(true);
+        var end=bridge.getDeclaredMethod("endFrame",net.minecraft.world.level.Level.class);end.setAccessible(true);
+        var avatar=com.himitsu.secret.client.avatar.SecretAvatarManager.class.getDeclaredField("avatar");avatar.setAccessible(true);
+        var proxy=com.himitsu.secret.client.avatar.SecretAvatarManager.class.getDeclaredField("proxy");proxy.setAccessible(true);
+        try {
+            check(!(Boolean)need.invoke(null,first),"idle frame requested an avatar fallback");
+            com.himitsu.secret.client.avatar.SecretAvatarManager.spawn(first,1,2,3);
+            Object initial=avatar.get(null);
+            check((Boolean)need.invoke(null,first),"missing normal draw lost its fallback");
+            mark.invoke(null,first);check(!(Boolean)need.invoke(null,first),"completed draw repeated in another native stage");
+            end.invoke(null,first);check((Boolean)need.invoke(null,first),"next presentation did not reset its completion marker");
+            com.himitsu.secret.client.avatar.SecretAvatarManager.spawn(first,9,9,9);
+            check(avatar.get(null)==initial,"same-world presence reset autonomous avatar movement");
+            com.himitsu.secret.client.avatar.SecretAvatarManager.spawn(second,20,30,40);
+            check(avatar.get(null)!=initial && !com.himitsu.secret.client.avatar.SecretAvatarManager.present(first),"avatar crossed worlds");
+            mark.invoke(null,second);
+            com.himitsu.secret.client.avatar.SecretAvatarManager.clear(first);
+            com.himitsu.secret.client.render.NativeRenderBridge.clearLevel(first);
+            check(!(Boolean)need.invoke(null,second),"late old-world unload cleared the new frame");
+            com.himitsu.secret.client.avatar.SecretAvatarManager.clear(second);
+            com.himitsu.secret.client.render.NativeRenderBridge.clearLevel(second);
+            check(avatar.get(null)==null && proxy.get(null)==null && !(Boolean)need.invoke(null,second),"unload retained avatar/proxy/fallback state");
+        } finally {
+            com.himitsu.secret.client.avatar.SecretAvatarManager.clear(first);com.himitsu.secret.client.avatar.SecretAvatarManager.clear(second);
+            com.himitsu.secret.client.render.NativeRenderBridge.clearLevel(first);com.himitsu.secret.client.render.NativeRenderBridge.clearLevel(second);
+        }
+        class ResourceLoader extends ClassLoader {
+            final Map<String,byte[]> resources=new HashMap<>();int reads;
+            @Override public InputStream getResourceAsStream(String name) {reads++;byte[] bytes=resources.get(name);return bytes==null?null:new java.io.ByteArrayInputStream(bytes);}
+            @Override public boolean equals(Object other){return other instanceof ResourceLoader;}
+            @Override public int hashCode(){return 1;}
+        }
+        java.util.function.BiFunction<String,String,byte[]> image=(name,parent)-> {
+            var writer=new org.objectweb.asm.ClassWriter(0);writer.visit(61,Opcodes.ACC_PUBLIC,name,null,parent,null);writer.visitEnd();return writer.toByteArray();
+        };
+        var one=new ResourceLoader();one.resources.put("fixture/Child.class",image.apply("fixture/Child","fixture/Base"));
+        var h=new com.himitsu.secret.transform.BytecodeHierarchy(one);
+        check(h.commonSuperClass("fixture/Base","fixture/Child").equals("fixture/Base"),"initial hierarchy mismatch");int reads=one.reads;
+        check(new com.himitsu.secret.transform.BytecodeHierarchy(one).commonSuperClass("fixture/Base","fixture/Child").equals("fixture/Base") && one.reads==reads,"new writer reread a stable header");
+        var two=new ResourceLoader();two.resources.put("fixture/Child.class",image.apply("fixture/Child","fixture/Other"));
+        check(new com.himitsu.secret.transform.BytecodeHierarchy(two).commonSuperClass("fixture/Other","fixture/Child").equals("fixture/Other"),"equal loaders shared an identity cache");
+        h.commonSuperClass("fixture/LateBase","fixture/LateChild");
+        one.resources.put("fixture/LateChild.class",image.apply("fixture/LateChild","fixture/LateBase"));
+        check(h.commonSuperClass("fixture/LateBase","fixture/LateChild").equals("fixture/LateBase"),"negative cache hid a late definition");
+        var node=new org.objectweb.asm.tree.ClassNode();node.name="fixture/Child";node.superName="fixture/Updated";node.access=Opcodes.ACC_PUBLIC;
+        h.remember(node);check(h.commonSuperClass("fixture/Updated","fixture/Child").equals("fixture/Updated"),"actual output header did not refresh hierarchy metadata");
+        System.out.println("RENDER_HIERARCHY_PASS idle_normal_fallback_frame_reset_world_unload weak_loader_identity header_reuse_late_definition_update MODEL_NO_GL");
+    }
+
     public static void main(String[] args) throws Exception {
         // Every production callback must match a real official-name Minecraft method.
         for(var method:OwnerSafetyHooks.class.getDeclaredMethods()) for(AsmHook hook:method.getAnnotationsByType(AsmHook.class)) {
@@ -474,6 +739,9 @@ public final class TargetGuardCheck {
         checkWeaponEntries();
         checkR14();
         checkLeanReads();
+        checkRenderAndHierarchy();
+        checkR20Events();
+        checkR20Entrypoints();
         System.out.println("TARGET_GUARDS_PASS owner_raw_motion_repair r16_ready_clone session_isolation attribute_index write_guards section_repair retry_budget indexed_residuals unload_barrier native_tick_swap identity_snapshot_no_auth bounded_weapon_scan new_instance scope_normal scope_throw production_hook_targets exact_identity_index startup_prepare_without_native left_swing_geometry attack_and_swing_before_cancel repeat_weave_once owner_session_localchannel fakeplayer multipart_cycle cursor_transfer_weapon_recovery entry_uuid MODEL_NO_GAME");
     }
 }

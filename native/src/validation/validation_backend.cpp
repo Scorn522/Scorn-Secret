@@ -27,7 +27,7 @@ Result verify(const Request& request) {
                 request,
                 identity
             );
-            wipe(result.refresh_token);
+            if(!established) wipe(result.refresh_token);
             wipe(result.ticket);
             wipe(result.ticket_signature);
             wipe(result.capability_payload);

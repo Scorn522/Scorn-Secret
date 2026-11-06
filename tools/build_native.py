@@ -65,8 +65,8 @@ def configure_keys():
 
 
 def main():
-    if len(sys.argv) != 2 or sys.argv[1] not in ("configure", "build", "check", "bridge-check"):
-        raise RuntimeError("Usage: build_native.py configure|build|check|bridge-check")
+    if len(sys.argv) != 2 or sys.argv[1] not in ("configure", "build", "check", "bridge-check", "credentials-check"):
+        raise RuntimeError("Usage: build_native.py configure|build|check|bridge-check|credentials-check")
     mode = sys.argv[1]
     if mode == "build":
         cmake, _ = cmake_tools()
@@ -76,6 +76,17 @@ def main():
     java = Path(os.environ.get("JAVA_HOME", ""))
     if not (java / "include/jni.h").is_file():
         raise RuntimeError("JAVA_HOME must point to a JDK 17 installation")
+    if mode == "credentials-check":
+        output = ROOT / "build/credential-storage-test.exe"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        run([zig, "c++", "-target", "x86_64-windows-gnu", "-std=c++20", "-O2",
+             "-D_WIN32_WINNT=0x0A00", "-DWIN32_LEAN_AND_MEAN", "-DNOMINMAX",
+             "-I", ROOT / "native/include", ROOT / "native/tools/auth_client_test.cpp",
+             *[ROOT / "native/src/validation" / name for name in
+               ("auth_client.cpp", "auth_config.cpp", "auth_crypto.cpp", "device_identity.cpp")],
+             "-lbcrypt", "-lcrypt32", "-lncrypt", "-lwinhttp", "-o", output])
+        print(run([output, "--credentials-check", "build/credential-storage-check"], timeout=15), end="", flush=True)
+        return
     if mode == "bridge-check":
         output = ROOT / "build/bridge-binding-check.dll"
         output.parent.mkdir(parents=True, exist_ok=True)

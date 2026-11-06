@@ -5,7 +5,7 @@ plugins {
     id 'net.minecraftforge.gradle' version '[6.0,6.2)'
 }
 
-version = '4.3-local-test-r18'
+version = '4.3-local-test-r20'
 group = 'com.himitsu.secret'
 
 base {
@@ -448,6 +448,17 @@ tasks.register('verifyLocalJar') {
         logger.lifecycle("Secret local package ready: ${jarFile.absolutePath}")
     }
 }
+tasks.register('checkRememberedCredentials', Exec) {
+    dependsOn tasks.named('configureNative')
+    inputs.files fileTree('native/include'), fileTree('native/src/validation'), file('native/tools/auth_client_test.cpp'), file('tools/build_native.py')
+    outputs.file layout.buildDirectory.file('credential-storage-test.exe')
+    doFirst {
+        environment 'JAVA_HOME', tasks.named('compileJava').get().javaCompiler.get().metadata.installationPath.asFile.absolutePath
+        commandLine pythonCommand.get(), file('tools/build_native.py').absolutePath, 'credentials-check'
+    }
+}
+tasks.named('check').configure { dependsOn tasks.named('checkRememberedCredentials') }
+
 tasks.register('checkNativeShutdown', Exec) {
     dependsOn tasks.named('configureNative')
     inputs.files fileTree('native/include'), file('native/tests/local_shutdown_test.cpp'), file('native/src/core/runtime_state.cpp'), file('tools/build_native.py')

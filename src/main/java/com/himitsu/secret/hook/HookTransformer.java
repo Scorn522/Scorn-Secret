@@ -78,7 +78,7 @@ public final class HookTransformer {
         int writerFlags = requiresNewFrames(definitions)
             ? ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS
             : ClassWriter.COMPUTE_MAXS;
-        ClassWriter writer = new LoaderAwareClassWriter(writerFlags, loader);
+        ClassWriter writer = new LoaderAwareClassWriter(writerFlags, loader, classNode);
         classNode.accept(writer);
         byte[] transformed = writer.toByteArray();
         validateSchema(classfileBuffer, transformed, className);

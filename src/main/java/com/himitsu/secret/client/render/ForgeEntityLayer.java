@@ -62,12 +62,15 @@ final class ForgeEntityLayer {
                 LightTexture.FULL_BRIGHT
             );
         } finally {
-            BUFFERS.endBatch();
+            try { BUFFERS.endBatch(); }
+            finally {
             RenderSystem.depthMask(true);
             RenderSystem.enableDepthTest();
             RenderSystem.setProjectionMatrix(previousProjection, previousSorting);
             RenderSystem.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
             RenderSystem.disableBlend();
+            }
         }
+        NativeRenderBridge.markRendered(minecraft.level);
     }
 }

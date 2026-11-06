@@ -10,6 +10,14 @@ import net.minecraft.client.gui.screens.Overlay;
 import net.minecraft.client.gui.screens.Screen;
 
 public final class DeathExecutionHooks {
+    @AsmHook(targetClass="net/minecraft/client/Minecraft",targetMethod="setScreen",targetAliases="m_91152_",targetDescriptor="(Lnet/minecraft/client/gui/screens/Screen;)V",mode=HookMode.GUARD,includeThis=true)
+    @AsmHook(targetClass="net/minecraft/client/Minecraft",targetMethod="forceSetScreen",targetAliases="m_91346_",targetDescriptor="(Lnet/minecraft/client/gui/screens/Screen;)V",mode=HookMode.GUARD,includeThis=true)
+    public static boolean ownerScreen(net.minecraft.client.Minecraft minecraft,net.minecraft.client.gui.screens.Screen screen) {
+        var player=minecraft.player;
+        return screen instanceof net.minecraft.client.gui.screens.DeathScreen && player!=null
+            && minecraft.level!=null && minecraft.level==player.level() && !DeathExecution.isClientActive() && OwnerSafetyHooks.kill(player);
+    }
+
     private DeathExecutionHooks() {
     }
 

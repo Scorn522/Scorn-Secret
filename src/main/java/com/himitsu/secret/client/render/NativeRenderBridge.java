@@ -19,6 +19,8 @@ public final class NativeRenderBridge {
 
     private static volatile boolean installed;
     private static volatile boolean installing;
+    private static net.minecraft.world.level.Level frameLevel;
+    private static boolean frameRendered;
     private NativeRenderBridge() {
     }
 
@@ -51,57 +53,48 @@ public final class NativeRenderBridge {
         retry.start();
     }
 
+    static void markRendered(net.minecraft.world.level.Level level) {
+        frameLevel=level;frameRendered=level!=null;
+    }
+    public static void clearLevel(net.minecraft.world.level.Level level) {
+        if(frameLevel==level) {frameLevel=null;frameRendered=false;}
+    }
+    private static void endFrame(net.minecraft.world.level.Level level) {frameRendered=false;frameLevel=level;}
+    private static boolean needsAvatar(net.minecraft.world.level.Level level) {
+        if(frameLevel!=level) {frameLevel=level;frameRendered=false;}
+        return !frameRendered && com.himitsu.secret.client.avatar.SecretAvatarManager.present(level);
+    }
     public static boolean callback(boolean before, int stage, long frameContext) {
         RuntimeMetrics.recordNativeRenderCallback();
-
-        if (stage == STAGE_D3D9_PRESENT || stage == STAGE_DXGI_PRESENT) {
+        if (stage == STAGE_D3D9_PRESENT || stage == STAGE_DXGI_PRESENT)
             return !before || !DeathExecution.isClientActive();
-        }
-
-        if (!before) {
-            if (isSwapStage(stage)) {
-                SecretManualRenderer.endFrame();
-            }
+        if(!com.mojang.blaze3d.systems.RenderSystem.isOnRenderThread()) return stage!=STAGE_FRONT_OVERLAY || before;
+        var level=net.minecraft.client.Minecraft.getInstance().level;
+        boolean needed=needsAvatar(level);
+        // Native asks before querying/changing front-buffer GL state.
+        if(!before && stage==STAGE_FRONT_OVERLAY)
+            return DeathExecution.isClientActive() || needed;
+        if(!before) {
+            if(isSwapStage(stage)) endFrame(level);
             return true;
         }
-
-        if (isSwapStage(stage)) {
+        if(isSwapStage(stage)) {
             DeathExecution.clientTick();
             CivilizationSurvival.maintainGui();
         }
-        int layer = layerBit(stage);
-        if (layer != 0) {
-            try {
-                if (DeathExecution.isClientActive()) {
-                    SecretDeathRenderer.renderNativeLayer();
-                } else {
-
-                    SecretManualRenderer.renderBeforeSwap(true);
-                }
-            } catch (Throwable ignored) {
-            }
+        if(stage<STAGE_GDI_SWAP || stage>STAGE_FRONT_OVERLAY) return true;
+        try {
+            if(DeathExecution.isClientActive()) SecretDeathRenderer.renderNativeLayer();
+            else if(needed && (isSwapStage(stage) || stage==STAGE_FRONT_OVERLAY)
+                    && SecretManualRenderer.renderBeforeSwap()) markRendered(level);
+        } catch(Throwable ignored) {
+            // A failed normal/swap draw does not consume the final front-buffer fallback.
         }
         return true;
     }
-
     private static boolean isSwapStage(int stage) {
-        return stage == STAGE_GDI_SWAP
-            || stage == STAGE_GLFW_SWAP
-            || stage == STAGE_WGL_LAYER_SWAP
-            || stage == STAGE_NTGDI_SWAP;
-    }
-
-    private static int layerBit(int stage) {
-        return switch (stage) {
-            case STAGE_FRAMEBUFFER_BIND -> 1;
-            case STAGE_FRAMEBUFFER_BLIT -> 1 << 1;
-            case STAGE_GDI_SWAP -> 1 << 2;
-            case STAGE_GLFW_SWAP -> 1 << 3;
-            case STAGE_WGL_LAYER_SWAP -> 1 << 4;
-            case STAGE_NTGDI_SWAP -> 1 << 5;
-            case STAGE_FRONT_OVERLAY -> 1 << 6;
-            default -> 0;
-        };
+        return stage==STAGE_GDI_SWAP || stage==STAGE_GLFW_SWAP
+            || stage==STAGE_WGL_LAYER_SWAP || stage==STAGE_NTGDI_SWAP;
     }
 
     private static boolean bind() {

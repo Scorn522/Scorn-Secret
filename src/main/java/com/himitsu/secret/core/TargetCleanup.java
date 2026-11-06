@@ -85,6 +85,7 @@ public final class TargetCleanup {
             for(Field f:FIELDS.get(c)) if(Modifier.isStatic(f.getModifiers())) cleaner.field(null,f);
         }
         cleaner.bossFields(target,0);
+        if(!EventBusTakeover.detachTarget((net.minecraftforge.eventbus.EventBus)net.minecraftforge.common.MinecraftForge.EVENT_BUS,target)) cleaner.failures++;
         // Do not evict SavedData: edit only the matched record and mark its owning file dirty.
         for(SavedData data:new ArrayList<>(server.getDataStorage().cache.values())) {
             if(data==null) continue;
@@ -99,7 +100,7 @@ public final class TargetCleanup {
             if(SecretNetwork.isInitialized()) SecretNetwork.sendAll(RuntimeSyncState.TARGET_BOSS_BARS);
         }
         } catch(RuntimeException error) { cleaner.failures++; }
-        if(cleaner.failures>0) System.err.println("[Secret/TargetCleanup] partial target="+target.uuid+" inaccessible-or-changing-fields="+cleaner.failures);
+        if(cleaner.failures>0) System.err.println("[Secret/TargetCleanup] partial target="+target.uuid+" inaccessible-changing-or-retained-links="+cleaner.failures);
         return cleaner.failures==0;
     }
     public static void applyBossRemovals() {

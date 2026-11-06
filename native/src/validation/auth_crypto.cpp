@@ -5,6 +5,8 @@
 #include <wincrypt.h>
 
 #include <algorithm>
+#include <atomic>
+#include <string_view>
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
@@ -239,5 +241,119 @@ std::array<unsigned char, 32> hkdf_sha256(
     std::array<unsigned char, 32> result{};
     std::memcpy(result.data(), okm.data(), (std::min)(okm.size(), static_cast<std::size_t>(32)));
     return result;
+}
+}
+
+namespace himitsu::validation::crypto {
+namespace {
+void wipe_saved(std::string& value) {if(!value.empty()) SecureZeroMemory(value.data(),value.size());value.clear();}
+std::string token_blob(const std::string& username,const std::string& value,bool protect) {
+    if(value.empty() || value.size()>32768) return {};
+    std::vector<unsigned char> input;
+    try {if(!protect) input=base64_decode(value);}
+    catch(...) {return {};}
+    std::string purpose="Secret.Refresh.v1:"+username;
+    DATA_BLOB source{static_cast<DWORD>(protect?value.size():input.size()),
+        protect?reinterpret_cast<BYTE*>(const_cast<char*>(value.data())):input.data()};
+    DATA_BLOB entropy{static_cast<DWORD>(purpose.size()),reinterpret_cast<BYTE*>(purpose.data())},result{};
+    BOOL ok=protect?CryptProtectData(&source,L"Secret remembered login",&entropy,nullptr,nullptr,CRYPTPROTECT_UI_FORBIDDEN,&result)
+        :CryptUnprotectData(&source,nullptr,&entropy,nullptr,nullptr,CRYPTPROTECT_UI_FORBIDDEN,&result);
+    if(!ok) return {};
+    std::string output;
+    try {
+        if(protect) output=base64_encode({result.pbData,result.cbData});
+        else if(result.cbData<=8192) output.assign(reinterpret_cast<char*>(result.pbData),result.cbData);
+    } catch(...) {SecureZeroMemory(result.pbData,result.cbData);LocalFree(result.pbData);throw;}
+    SecureZeroMemory(result.pbData,result.cbData);LocalFree(result.pbData);
+    if(output.find('\0')!=std::string::npos) wipe_saved(output);
+    return output;
+}
+std::string_view trim_saved(std::string_view value) {
+    auto first=value.find_first_not_of(" \t\r\n");if(first==std::string_view::npos)return {};
+    return value.substr(first,value.find_last_not_of(" \t\r\n")-first+1);
+}
+}
+std::wstring credentials_path() {
+    std::array<wchar_t,32768> profile{};
+    DWORD size=GetEnvironmentVariableW(L"USERPROFILE",profile.data(),static_cast<DWORD>(profile.size()));
+    if(!size || size>=profile.size()) return {};
+    return std::wstring(profile.data(),size)+L"\\Secret.ini";
+}
+static bool write_credentials(const std::wstring& path,const std::string& username,const std::string& token,bool remember) {
+    if(path.empty() || username.size()>159 || username.find_first_of("\r\n")!=std::string::npos
+        || username.find('\0')!=std::string::npos || token.size()>8192) return false;
+    const bool keep=remember && !username.empty() && !token.empty();
+    std::string encoded;
+    try {if(keep) encoded=token_blob(username,token,true);}catch(...) {return false;}
+    if(keep && encoded.empty()) return false; // No plaintext fallback.
+    std::string contents=std::string("[info]\r\nRemember = ")+(keep?"true":"false")
+        +"\r\nusername = "+(keep?username:std::string{})
+        +"\r\nrefresh_token = "+(keep?"dpapi:"+encoded:std::string{})+"\r\n";
+    static std::atomic<unsigned long> serial{0};
+    std::wstring temporary=path+L".tmp-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(++serial);
+    HANDLE file=CreateFileW(temporary.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(file==INVALID_HANDLE_VALUE) return false;
+    DWORD written=0;
+    bool ok=WriteFile(file,contents.data(),static_cast<DWORD>(contents.size()),&written,nullptr)
+        && written==contents.size() && FlushFileBuffers(file);
+    CloseHandle(file);
+    if(ok) ok=MoveFileExW(temporary.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE;
+    if(!ok) DeleteFileW(temporary.c_str());
+    return ok;
+}
+static HANDLE lock_credentials(const std::wstring& path) {
+    if(path.empty()) return INVALID_HANDLE_VALUE;
+    return CreateFileW((path+L".lock").c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_ALWAYS,
+        FILE_ATTRIBUTE_HIDDEN|FILE_FLAG_DELETE_ON_CLOSE,nullptr);
+}
+bool save_credentials(const std::wstring& path,const std::string& username,const std::string& token,bool remember) {
+    HANDLE guard=lock_credentials(path);if(guard==INVALID_HANDLE_VALUE)return false;
+    bool saved=false;
+    try {saved=write_credentials(path,username,token,remember);}catch(...) {}
+    CloseHandle(guard);return saved;
+}
+backend::Request load_credentials(const std::wstring& path,bool migrate) {
+    backend::Request request{};if(path.empty()) return request;
+    HANDLE file=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(file==INVALID_HANDLE_VALUE) return request;
+    LARGE_INTEGER size{};
+    if(!GetFileSizeEx(file,&size) || size.QuadPart<=0 || size.QuadPart>65536){CloseHandle(file);return request;}
+    std::string contents(static_cast<std::size_t>(size.QuadPart),'\0');DWORD count=0;
+    bool read=ReadFile(file,contents.data(),static_cast<DWORD>(contents.size()),&count,nullptr)!=FALSE;CloseHandle(file);
+    if(!read){wipe_saved(contents);return request;}contents.resize(count);
+    bool info=false,remember=false,legacy=false;std::string encrypted;
+    std::string_view text(contents);
+    while(!text.empty()) {
+        auto newline=text.find('\n');auto line=trim_saved(text.substr(0,newline));
+        if(newline==std::string_view::npos) text={};else text.remove_prefix(newline+1);
+        if(line.empty() || line.front()==';' || line.front()=='#') continue;
+        if(line.front()=='[' && line.back()==']'){info=trim_saved(line.substr(1,line.size()-2))=="info";continue;}
+        if(!info)continue;auto separator=line.find('=');if(separator==std::string_view::npos)continue;
+        auto key=trim_saved(line.substr(0,separator));
+        if(key=="password"){legacy=true;continue;} // Never populate or reuse a saved password.
+        auto value=trim_saved(line.substr(separator+1));
+        if(key=="Remember")remember=value=="true"||value=="TRUE"||value=="1";
+        else if(key=="username" && value.size()<=159)request.username=value;
+        else if(key=="refresh_token" && value.size()<=32768)encrypted=value;
+    }
+    if(remember && !request.username.empty() && encrypted.rfind("dpapi:",0)==0)
+        request.refresh_token=token_blob(request.username,encrypted.substr(6),false);
+    request.remember_me=!request.refresh_token.empty();
+    wipe_saved(contents);
+    if(legacy && migrate && !save_credentials(path,request.username,request.refresh_token,request.remember_me)) {
+        wipe_saved(request.refresh_token);throw std::runtime_error("Cannot remove legacy plaintext credentials");
+    }
+    return request;
+}
+bool rotate_credentials(const std::wstring& path,const std::string& username,const std::string& previous,const std::string& next) {
+    HANDLE guard=lock_credentials(path);if(guard==INVALID_HANDLE_VALUE)return false;
+    bool saved=false;
+    try {
+        auto current=load_credentials(path,false);
+        bool match=current.remember_me && current.username==username && current.refresh_token==previous;
+        wipe_saved(current.refresh_token);
+        saved=match && write_credentials(path,username,next,true);
+    } catch(...) {}
+    CloseHandle(guard);return saved;
 }
 }
