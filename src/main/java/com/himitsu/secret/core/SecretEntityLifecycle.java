@@ -8,10 +8,17 @@ public final class SecretEntityLifecycle {
     private SecretEntityLifecycle() {
     }
 
+    public static void entityLeft(net.minecraftforge.event.entity.EntityLeaveLevelEvent event) {
+        if(event.getEntity() instanceof com.himitsu.secret.entity.SecretEntity entity
+            && entity.removalReason==net.minecraft.world.entity.Entity.RemovalReason.UNLOADED_TO_CHUNK
+            && !AuthoritativeEntityTopology.expected(entity)) SecretEntityRegistry.leave(entity);
+    }
     @SubscribeEvent
     public static void levelUnload(LevelEvent.Unload event) {
         if (event.getLevel() instanceof Level level) {
+            AuthoritativeEntityTopology.clearLevel(level);
             SecretEntityRegistry.clearLevel(level);
+            TargetCleanup.clearLevel(level);
             SecretEntityHooks.clearLevel(level);
             CivilizationSurvival.clearLevel(level);
         }

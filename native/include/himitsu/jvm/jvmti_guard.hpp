@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 
 #include <jvmti.h>
 
@@ -8,7 +9,9 @@ bool install_jvmti_guard();
 bool quarantine_external_jvmti(JNIEnv* env);
 bool jvmti_isolation_enabled();
 bool start_jvmti_guard_monitor();
-void shutdown_jvmti_guard();
+void request_jvmti_guard_stop();
+bool shutdown_jvmti_guard(std::uint64_t deadline);
+jvmtiError trusted_current_thread(jthread* thread);
 jvmtiEnv* trusted_jvmti();
 JavaVM* trusted_vm();
 bool refresh_trusted_jvmti();

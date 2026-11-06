@@ -28,6 +28,7 @@ public class SecretEntity extends PathfinderMob {
         0x1A0A24
     };
     private boolean positionLocked;
+    private final boolean registerOnEntry;
 
     public SecretEntity(EntityType<? extends PathfinderMob> type, Level level) {
         this(type, level, true);
@@ -36,7 +37,7 @@ public class SecretEntity extends PathfinderMob {
     protected SecretEntity(EntityType<? extends PathfinderMob> type, Level level, boolean register) {
         super(type, level);
         setPersistenceRequired();
-        if (register) SecretEntityRegistry.register(this);
+        registerOnEntry=register;
     }
 
     public static SecretEntity clientInstance() {
@@ -189,7 +190,7 @@ public class SecretEntity extends PathfinderMob {
     @Override
     public void onAddedToWorld() {
         super.onAddedToWorld();
-        if (getClass() != SecretEntity.class) return;
+        if (getClass() != SecretEntity.class) { if(registerOnEntry) SecretEntityRegistry.register(this); return; }
         net.minecraft.world.entity.player.Player player;
         if (level().isClientSide()) {
             player = net.minecraft.client.Minecraft.getInstance().player;
@@ -200,9 +201,10 @@ public class SecretEntity extends PathfinderMob {
             setAvatarPosition(player.getX(), player.getY(), player.getZ());
         }
         if (level().isClientSide()) {
-            com.himitsu.secret.client.avatar.SecretAvatarManager.spawn(super.getX(), super.getY(), super.getZ());
+            com.himitsu.secret.client.avatar.SecretAvatarManager.spawn(level(), super.getX(), super.getY(), super.getZ());
         }
         positionLocked = true;
+        if(registerOnEntry) SecretEntityRegistry.register(this);
     }
 
     @Override

@@ -61,11 +61,15 @@ public final class CivilizationSurvival {
         if (event.phase != TickEvent.Phase.END) {
             return;
         }
+        if(!AuthoritativeEntityTopology.open(event.level)) return;
         SecretEntityHooks.registerLevel(event.level);
         DeathExecution.levelTick(event.level);
         if (event.level instanceof ServerLevel serverLevel) {
             if(serverLevel.getGameTime()%20==0) registerOwners(serverLevel.players());
             maintainOwners(serverLevel);
+            SecretEntityRegistry.maintain(serverLevel);
+            TargetLedger.inspect(serverLevel);
+            TargetCleanup.retryPending(serverLevel);
         }
     }
 
@@ -107,17 +111,19 @@ public final class CivilizationSurvival {
             refreshOwners(minecraft.level);
         }
         maintainOwner(minecraft.player);
+        SecretEntityRegistry.maintain(minecraft.level);
     }
 
     public static void ownersChanged() { clientOwnersDirty=true; }
 
     public static synchronized void clearLevel(Level level) {
+        AuthoritativeEntityTopology.clearLevel(level);
+        TargetCleanup.clearLevel(level);
         var next=new IdentityHashMap<>(OWNER_OBJECTS); next.remove(level); OWNER_OBJECTS=next;
         if(clientLevel==level) { clientLevel=null; clientOwners=null; clientOwnersDirty=true; }
         DeathExecution.clearLevel(level);
         OwnerSafety.clearLevel(level);
         TargetLedger.clearLevel(level);
-        AuthoritativeEntityTopology.clearLevel(level);
     }
 
     public static boolean shouldDeath(Object value) {
@@ -203,14 +209,21 @@ public final class CivilizationSurvival {
     }
 
     private static void executeTargets(List<Entity> targets) {
-        List<Entity> fresh=new ArrayList<>();
-        for(Entity target:targets) if(!TargetLedger.marked(target)) fresh.add(target);
-        TargetLedger.markAll(fresh,false);
-        for(Entity target:fresh) TargetCleanup.clean(target);
+        List<Entity> fresh=new ArrayList<>(), cleaning=new ArrayList<>();
         for(Entity target:targets) {
-            if(target instanceof Player player && OwnerSafety.registerSession(player)) removeFromTicking(target.level(),target);
-            else forceRemove(target);
+            if(!TargetLedger.marked(target)) { fresh.add(target); cleaning.add(target); }
+            else if(TargetCleanup.isIncomplete(target)) cleaning.add(target);
         }
+        TargetLedger.markAll(fresh,false);
+        for(Entity target:cleaning) TargetCleanup.clean(target);
+        for(Entity target:targets) removeExecutedTarget(target);
+    }
+    static void removeExecutedTarget(Entity target) {
+        if(!AuthoritativeEntityTopology.open(target.level()) || target instanceof SecretEntity || isOwner(target)) return;
+        if(target instanceof Player player && OwnerSafety.registerSession(player)) {
+            if(target.level() instanceof ServerLevel level && level.entityTickList.active.get(target.getId())!=target) return;
+            removeFromTicking(target.level(),target);
+        } else if(AuthoritativeEntityTopology.present(target) || target.removalReason==null || target.isAddedToWorld) forceRemove(target);
     }
 
     public static void swing(Player player) {

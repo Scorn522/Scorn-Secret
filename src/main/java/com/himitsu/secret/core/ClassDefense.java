@@ -6,26 +6,23 @@ import com.himitsu.secret.hook.HookTransformer;
 import java.io.IOException;
 import java.io.InputStream;
 import java.security.ProtectionDomain;
-import java.util.Map;
 import org.objectweb.asm.ClassReader;
 
 public final class ClassDefense {
-    private static volatile Map<String, byte[]> sourceClasses = Map.of();
     private static volatile String defenseMode = "mixin";
 
     private ClassDefense() {
     }
 
     /** Publish the same protection policy before enabling the class hook, without requesting VM changes. */
-    public static void prepare(SecretConfig config, Map<String, byte[]> baselines) {
-        sourceClasses = Map.copyOf(baselines);
+    public static void prepare(SecretConfig config) {
         defenseMode = config.classDefense();
     }
 
     /** SourceShield already handles owned images; initialization never requests VM class changes. */
-    public static void initialize(SecretConfig config, Map<String, byte[]> baselines) {
+    public static void initialize(SecretConfig config) {
         if (!SecretNative.isLoaded()) throw new IllegalStateException("Native bridge is not ready");
-        prepare(config, baselines);
+        prepare(config);
         System.out.println("[Secret/ClassDefense] Source shield configuration ready");
     }
 
@@ -41,10 +38,9 @@ public final class ClassDefense {
         String binaryName = internalName.replace('/', '.').replace('+', '/');
         if (skip(binaryName)) return null;
         byte[] restored = classFileBuffer;
-        byte[] sourceOverride = sourceClasses.get(internalName);
-        if (sourceOverride != null && sourceOverride.length != 0) {
-            restored = sourceOverride.clone();
-        } else if (!internalName.startsWith("com/himitsu/secret/")) {
+        // Owned input has already passed Native SourceShield. Keep one authenticated
+        // baseline; a mutable Java copy must never override it after that check.
+        if (!internalName.startsWith("com/himitsu/secret/")) {
             // The native shield supplies verified outer bootstrap bytes. Replaying
             // third-party launch plugins here would reintroduce their edits.
             try {

@@ -47,6 +47,7 @@ public final class TargetGuardCheck {
     }
     public static final class EntityFixture extends net.minecraft.world.entity.Entity {
         net.minecraftforge.entity.PartEntity<?>[] parts;
+        static Collection<Object> cleanupRefs;
         EntityFixture() { super(net.minecraft.world.entity.EntityType.PIG,null); }
         public void defineSynchedData() {}
         public void readAdditionalSaveData(net.minecraft.nbt.CompoundTag tag) {}
@@ -60,6 +61,10 @@ public final class TargetGuardCheck {
         public void readAdditionalSaveData(net.minecraft.nbt.CompoundTag tag) {}
         public void addAdditionalSaveData(net.minecraft.nbt.CompoundTag tag) {}
         public net.minecraft.network.protocol.Packet<net.minecraft.network.protocol.game.ClientGamePacketListener> getAddEntityPacket() { throw new UnsupportedOperationException(); }
+    }
+    public static final class SecretFixture extends com.himitsu.secret.entity.SecretEntity {
+        SecretFixture() { super(null,null); }
+        public net.minecraft.world.entity.EntityType<?> getType() { return net.minecraft.world.entity.EntityType.PIG; }
     }
     public static final class MenuFixture extends net.minecraft.world.inventory.AbstractContainerMenu {
         MenuFixture() { super(null,0); }
@@ -182,6 +187,7 @@ public final class TargetGuardCheck {
             player.containerMenu.setCarried(net.minecraft.world.item.ItemStack.EMPTY);
             OwnerSafety.access(player,0,true); OwnerSafety.access(player,0,false); weapon.invoke(binding,false);
             check(inventory.items.stream().allMatch(net.minecraft.world.item.ItemStack::isEmpty),"intentional container transfer regenerated weapon");
+            checkR16(unsafe,level,player,server,handler);
             OwnerSafety.revoke(player); check(!CivilizationSurvival.isOwner(player),"owner revocation was not published");
             set(binding,bindingType,"owner",true);
             local.close().sync(); OwnerSafetyHooks.disconnected(connection,null);
@@ -199,6 +205,173 @@ public final class TargetGuardCheck {
                 }
             }
         }
+    }
+    @SuppressWarnings({"unchecked","rawtypes"})
+    private static void checkR16(sun.misc.Unsafe unsafe,net.minecraft.server.level.ServerLevel level,
+        net.minecraft.server.level.ServerPlayer player,net.minecraft.server.MinecraftServer server,
+        net.minecraft.server.network.ServerGamePacketListenerImpl handler) throws Exception {
+        Method listenerList=net.minecraftforge.eventbus.api.EventListenerHelper.class.getDeclaredMethod("getListenerListInternal",Class.class,boolean.class);
+        listenerList.setAccessible(true);
+        listenerList.invoke(null,net.minecraftforge.network.NetworkEvent.class,true);
+        listenerList.invoke(null,net.minecraftforge.network.NetworkEvent.GatherLoginPayloadsEvent.class,true);
+        set(level,net.minecraft.server.level.ServerLevel.class,"server",server);
+        set(server,net.minecraft.server.MinecraftServer.class,"serverThread",Thread.currentThread());
+        var manager=(net.minecraft.world.level.entity.PersistentEntitySectionManager<net.minecraft.world.entity.Entity>)unsafe.allocateInstance(net.minecraft.world.level.entity.PersistentEntitySectionManager.class);
+        manager.visibleEntityStorage=new net.minecraft.world.level.entity.EntityLookup<>();
+        manager.knownUuids=new HashSet<>();
+        var visibility=new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<net.minecraft.world.level.entity.Visibility>();
+        visibility.defaultReturnValue(net.minecraft.world.level.entity.Visibility.TICKING);
+        set(manager,net.minecraft.world.level.entity.PersistentEntitySectionManager.class,"chunkVisibility",visibility);
+        manager.sectionStorage=new net.minecraft.world.level.entity.EntitySectionStorage<>(net.minecraft.world.entity.Entity.class,visibility);
+        level.entityManager=manager; level.entityTickList=new net.minecraft.world.level.entity.EntityTickList();
+        level.dragonParts=new Int2ObjectOpenHashMap<>(); level.players=new ArrayList<>();
+        var cache=(net.minecraft.server.level.ServerChunkCache)unsafe.allocateInstance(net.minecraft.server.level.ServerChunkCache.class);
+        var chunks=(net.minecraft.server.level.ChunkMap)unsafe.allocateInstance(net.minecraft.server.level.ChunkMap.class);
+        chunks.entityMap=new Int2ObjectOpenHashMap<>();
+        set(cache,net.minecraft.server.level.ServerChunkCache.class,"chunkMap",chunks);
+        var storage=(net.minecraft.world.level.storage.DimensionDataStorage)unsafe.allocateInstance(net.minecraft.world.level.storage.DimensionDataStorage.class);
+        set(storage,net.minecraft.world.level.storage.DimensionDataStorage.class,"cache",new HashMap<>());
+        set(cache,net.minecraft.server.level.ServerChunkCache.class,"dataStorage",storage);
+        set(level,net.minecraft.server.level.ServerLevel.class,"chunkSource",cache);
+        player.entityData=new net.minecraft.network.syncher.SynchedEntityData(player);
+        player.entityData.define(net.minecraft.world.entity.LivingEntity.DATA_HEALTH_ID,20.0F);
+        player.entityData.define(net.minecraft.world.entity.LivingEntity.DATA_LIVING_ENTITY_FLAGS,(byte)0);
+        set(player,net.minecraft.world.entity.player.Player.class,"abilities",new net.minecraft.world.entity.player.Abilities());
+        check(OwnerSafetyHooks.removal(player,net.minecraft.world.entity.Entity.RemovalReason.DISCARDED),"Owner remove not guarded");
+        check(OwnerSafetyHooks.health(player,Float.NaN),"Owner NaN health not guarded");
+        check(OwnerSafetyHooks.health(player,0),"Owner zero health not guarded");
+        OwnerSafety.access(player,2,true);
+        try { check(!OwnerSafetyHooks.kill(player)&&!OwnerSafetyHooks.health(player,0),"legitimate lifecycle was blocked"); }
+        finally { OwnerSafety.access(player,2,false); }
+        var oldOwners=OwnerSafety.class.getDeclaredField("owners"); oldOwners.setAccessible(true);
+        Object binding=((Map<?,?>)oldOwners.get(null)).get(player);
+        var replacement=(net.minecraft.server.level.ServerPlayer)unsafe.allocateInstance(net.minecraft.server.level.ServerPlayer.class);
+        replacement.uuid=player.uuid; replacement.id=987; replacement.connection=handler;
+        set(replacement,net.minecraft.server.level.ServerPlayer.class,"server",server);
+        set(replacement,net.minecraft.world.entity.Entity.class,"level",level);
+        Field marks=DeathExecution.class.getDeclaredField("MARKED_OBJECTS"); marks.setAccessible(true);
+        Method remember=DeathExecution.class.getDeclaredMethod("remember",net.minecraft.world.entity.player.Player.class,boolean.class);remember.setAccessible(true);
+        remember.invoke(null,player,true);
+        check(!CivilizationSurvival.isOwner(player)&&OwnerSafetyHooks.heal(player,20)&&OwnerSafetyHooks.revive(player),"death did not override Owner");
+        check(OwnerSafetyHooks.health(player,20)&&player.entityData.get(net.minecraft.world.entity.LivingEntity.DATA_HEALTH_ID)==0,"death health write escaped");
+        DeathExecution.onPlayerClone(player,replacement);
+        check(DeathExecution.isMarked(replacement),"clone did not inherit identity");
+        int[] pending=(int[])((Map<?,?>)marks.get(null)).get(replacement);
+        check(pending[1]==0,"clone was enforced before ready");
+        DeathExecution.onPlayerReady(replacement);check(pending[1]==0,"unbound replacement became ready");
+        replacement.id=988; replacement.entityData=new net.minecraft.network.syncher.SynchedEntityData(replacement);
+        replacement.entityData.define(net.minecraft.world.entity.LivingEntity.DATA_HEALTH_ID,20.0F);
+        replacement.entityData.define(net.minecraft.world.entity.LivingEntity.DATA_LIVING_ENTITY_FLAGS,(byte)0);
+        set(replacement,net.minecraft.world.entity.player.Player.class,"abilities",new net.minecraft.world.entity.player.Abilities());
+        handler.player=replacement;
+        set(server.getPlayerList(),net.minecraft.server.players.PlayerList.class,"playersByUUID",new HashMap<>(Map.of(player.uuid,replacement)));
+        DeathExecution.onPlayerReady(replacement);
+        check(pending[1]==1 && replacement.dead && replacement.entityData.get(net.minecraft.world.entity.LivingEntity.DATA_HEALTH_ID)==0,"ready clone escaped enforcement");
+        check(TargetLedger.marked(replacement,true),"final clone identity not published");
+        var foreign=(net.minecraft.server.level.ServerPlayer)unsafe.allocateInstance(net.minecraft.server.level.ServerPlayer.class);
+        foreign.uuid=player.uuid; foreign.id=989;
+        set(foreign,net.minecraft.world.entity.Entity.class,"level",level);
+        DeathExecution.onPlayerClone(replacement,foreign);
+        check(!DeathExecution.isMarked(foreign),"unrelated same-UUID session inherited execution");
+        handler.player=player;
+        set(server.getPlayerList(),net.minecraft.server.players.PlayerList.class,"playersByUUID",new HashMap<>(Map.of(player.uuid,player)));
+        DeathExecution.clearLevel(level);
+        set(binding,binding.getClass(),"owner",true);
+        var map=new net.minecraft.world.entity.ai.attributes.AttributeMap(net.minecraft.world.entity.ai.attributes.AttributeSupplier.builder().add(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH).build());
+        var attribute=map.getInstance(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH);
+        var motion=binding.getClass().getDeclaredMethod("motion");motion.setAccessible(true);
+        var stablePosition=new net.minecraft.world.phys.Vec3(4,60,8);
+        var stableVelocity=new net.minecraft.world.phys.Vec3(0.5,0.25,-0.5);
+        set(player,net.minecraft.world.entity.Entity.class,"position",stablePosition);
+        player.setDeltaMovement(stableVelocity);motion.invoke(binding);
+        player.setDeltaMovement(new net.minecraft.world.phys.Vec3(Double.NaN,Double.POSITIVE_INFINITY,0));
+        motion.invoke(binding);
+        check(player.getDeltaMovement().equals(stableVelocity),"Owner raw velocity corruption was not repaired");
+        var legitimateVelocity=new net.minecraft.world.phys.Vec3(-2,3,4);
+        player.setDeltaMovement(legitimateVelocity);motion.invoke(binding);
+        check(player.position()==stablePosition && player.getDeltaMovement()==legitimateVelocity,"normal motion was copied or changed");
+        Field known=binding.getClass().getDeclaredField("positionKnown");known.setAccessible(true);
+        check(known.getBoolean(binding),"finite position was not recorded");
+        set(player,net.minecraft.world.entity.Entity.class,"dimensions",net.minecraft.world.entity.EntityDimensions.fixed(0.6F,1.8F));
+        player.blockPosition=net.minecraft.core.BlockPos.containing(stablePosition);
+        player.chunkPosition=new net.minecraft.world.level.ChunkPos(player.blockPosition);
+        player.levelCallback=net.minecraft.world.level.entity.EntityInLevelCallback.NULL;
+        boolean added=player.isAddedToWorld;player.isAddedToWorld=false;
+        try {
+            set(player,net.minecraft.world.entity.Entity.class,"position",new net.minecraft.world.phys.Vec3(Double.NaN,60,8));
+            motion.invoke(binding);
+            check(player.position().equals(stablePosition) && Double.isFinite(player.getBoundingBox().minX),"Owner raw position corruption was not repaired");
+            set(player,net.minecraft.world.entity.Entity.class,"position",null);motion.invoke(binding);
+            check(player.position().equals(stablePosition) && player.blockPosition.equals(net.minecraft.core.BlockPos.containing(stablePosition)),"null position lost the trusted position or block index");
+        } finally {player.isAddedToWorld=added;}
+
+        Field attributeIndex=OwnerSafety.class.getDeclaredField("attributeOwners"); attributeIndex.setAccessible(true);
+        Field attributes=OwnerSafety.class.getDeclaredField("ATTRIBUTES"); attributes.setAccessible(true);
+        Object beforeIndex=attributeIndex.get(null); Map savedAttributes=new HashMap((Map)attributes.get(null));
+        try {
+            int count=((Map)attributes.get(null)).size(); OwnerSafety.attribute(map,attribute);
+            check(((Map)attributes.get(null)).size()==count,"ordinary mob touched Owner attribute table");
+            var index=new IdentityHashMap<>();index.put(map,binding);attributeIndex.set(null,index);
+            OwnerSafety.attribute(map,attribute);
+            check(OwnerSafety.baseDenied(attribute,0),"late Owner attribute was not registered");
+            OwnerSafety.access(player,1,true);
+            try { check(!OwnerSafety.baseDenied(attribute,0),"legitimate effect scope was blocked"); }
+            finally {OwnerSafety.access(player,1,false);}
+        } finally {attributeIndex.set(null,beforeIndex);((Map)attributes.get(null)).clear();((Map)attributes.get(null)).putAll(savedAttributes);}
+        EntityFixture target=(EntityFixture)unsafe.allocateInstance(EntityFixture.class); target.id=71;target.uuid=UUID.randomUUID();
+        set(target,net.minecraft.world.entity.Entity.class,"level",level);
+        set(target,net.minecraft.world.entity.Entity.class,"blockPosition",new net.minecraft.core.BlockPos(0,64,0));
+        set(target,net.minecraft.world.entity.Entity.class,"chunkPosition",new net.minecraft.world.level.ChunkPos(0,0));
+        target.levelCallback=net.minecraft.world.level.entity.EntityInLevelCallback.NULL;
+        TargetLedger.mark(target,false);
+        int[] ids=TargetLedger.ids(level);check(ids==TargetLedger.ids(level),"ledger recreates id snapshot on read");
+        var other=(EntityFixture)unsafe.allocateInstance(EntityFixture.class);other.id=71;other.uuid=UUID.randomUUID();
+        set(other,net.minecraft.world.entity.Entity.class,"level",level);
+        manager.visibleEntityStorage.byId.put(71,other);level.entityTickList.active.put(71,other);
+        TargetLedger.inspect(level);check(manager.visibleEntityStorage.byId.get(71)==other,"reused numeric id removed unrelated entity");
+        target.id=72;manager.visibleEntityStorage.byUuid.put(target.uuid,target);level.entityTickList.active.put(72,target);
+        TargetLedger.inspect(level);check(manager.visibleEntityStorage.byUuid.get(target.uuid)==null&&!level.entityTickList.active.containsKey(72),"UUID-only residual survived");
+        EntityFixture.cleanupRefs=Collections.unmodifiableList(List.of(target));
+        check(!TargetCleanup.clean(target)&&TargetCleanup.isIncomplete(target),"partial cleanup not retained");
+        for(int tick:new int[]{20,40,60}) {set(server,net.minecraft.server.MinecraftServer.class,"tickCount",tick);TargetCleanup.retryPending(level);}
+        Field exhausted=TargetCleanup.class.getDeclaredField("EXHAUSTED");exhausted.setAccessible(true);
+        check(((WeakTargetSet<net.minecraft.world.entity.Entity>)exhausted.get(null)).contains(target),"retry limit not reached");
+        EntityFixture.cleanupRefs=new ArrayList<>(List.of(target));
+        check(TargetCleanup.clean(target)&&!TargetCleanup.isIncomplete(target)&&EntityFixture.cleanupRefs.isEmpty(),"explicit rehit did not complete cleanup");
+        EntityFixture.cleanupRefs=null;
+        SecretFixture secret=(SecretFixture)unsafe.allocateInstance(SecretFixture.class); secret.id=88; secret.uuid=UUID.randomUUID();
+        set(secret,net.minecraft.world.entity.Entity.class,"level",level);
+        set(secret,net.minecraft.world.entity.Entity.class,"blockPosition",new net.minecraft.core.BlockPos(0,64,0));
+        set(secret,net.minecraft.world.entity.Entity.class,"chunkPosition",new net.minecraft.world.level.ChunkPos(0,0));
+        var oldSection=new net.minecraft.world.level.entity.EntitySection<net.minecraft.world.entity.Entity>(net.minecraft.world.entity.Entity.class,net.minecraft.world.level.entity.Visibility.TICKING);
+        oldSection.add(secret);
+        var callback=(net.minecraft.world.level.entity.PersistentEntitySectionManager<?>.Callback)unsafe.allocateInstance(net.minecraft.world.level.entity.PersistentEntitySectionManager.Callback.class);
+        set(callback,net.minecraft.world.level.entity.PersistentEntitySectionManager.Callback.class,"currentSection",oldSection);
+        secret.levelCallback=callback;
+        SecretEntityRegistry.register(secret);check(SecretEntityRegistry.instance(level)==null,"constructor-stage Secret was registered");
+        secret.isAddedToWorld=true;SecretEntityRegistry.register(secret);
+        var tracked=(net.minecraft.server.level.ChunkMap.TrackedEntity)unsafe.allocateInstance(net.minecraft.server.level.ChunkMap.TrackedEntity.class);
+        set(tracked,net.minecraft.server.level.ChunkMap.TrackedEntity.class,"entity",secret);chunks.entityMap.put(88,tracked);
+        AuthoritativeEntityTopology.maintain(secret);
+        long section=net.minecraft.core.SectionPos.asLong(secret.blockPosition());
+        check(manager.sectionStorage.getSection(section).storage.allInstances.stream().anyMatch(e->e==secret),"missing section not rebuilt");
+        check(manager.visibleEntityStorage.byId.get(88)==secret&&level.entityTickList.active.get(88)==secret,"Secret topology not restored");
+        check(callback.currentSection==manager.sectionStorage.getSection(section)&&oldSection.storage.allInstances.isEmpty(),"movement callback retained the deleted section");
+        SecretFixture duplicate=(SecretFixture)unsafe.allocateInstance(SecretFixture.class);duplicate.uuid=UUID.randomUUID();duplicate.isAddedToWorld=true;
+        set(duplicate,net.minecraft.world.entity.Entity.class,"level",level);
+        SecretEntityRegistry.register(duplicate);check(SecretEntityRegistry.instance(level)==secret,"second same-world Secret replaced the first");
+        var otherWorld=(net.minecraft.server.level.ServerLevel)unsafe.allocateInstance(net.minecraft.server.level.ServerLevel.class);
+        check(SecretEntityRegistry.instance(otherWorld)==null,"Secret leaked across worlds");
+        SecretFixture otherSecret=(SecretFixture)unsafe.allocateInstance(SecretFixture.class);otherSecret.uuid=UUID.randomUUID();otherSecret.isAddedToWorld=true;
+        set(otherSecret,net.minecraft.world.entity.Entity.class,"level",otherWorld);SecretEntityRegistry.register(otherSecret);
+        check(SecretEntityRegistry.instance(level)==secret&&SecretEntityRegistry.instance(otherWorld)==otherSecret,"independent dimensions were not retained");
+        SecretEntityRegistry.clearLevel(otherWorld);
+        check(SecretEntityRegistry.instance(level)==secret,"other dimension unload removed current Secret");
+        AuthoritativeEntityTopology.clearLevel(level); SecretEntityRegistry.clearLevel(level);TargetCleanup.clearLevel(level);
+        manager.sectionStorage.remove(section);manager.visibleEntityStorage.byId.remove(88);
+        AuthoritativeEntityTopology.maintain(secret);SecretEntityRegistry.register(secret);
+        check(manager.sectionStorage.getSection(section)==null&&SecretEntityRegistry.instance(level)==null,"unloaded world was resurrected");
+        TargetLedger.clearLevel(level);
     }
     private static void checkLeanReads() throws Exception {
         for(Class<?> type:List.of(OwnerSafety.class,CivilizationSurvival.class)) {
@@ -263,9 +436,9 @@ public final class TargetGuardCheck {
         identities.clearScope(world); check(!identities.contains(target),"world lifecycle releases exact targets");
         // Preparing construction-time policy must work while no native library is loaded.
         check(!com.himitsu.secret.bridge.SecretNative.isLoaded(),"offline bridge unexpectedly loaded");
-        ClassDefense.prepare(new com.himitsu.secret.config.SecretConfig("mixin",false),Map.of());
+        ClassDefense.prepare(new com.himitsu.secret.config.SecretConfig("mixin",false));
         try {
-            ClassDefense.initialize(new com.himitsu.secret.config.SecretConfig("mixin",false),Map.of());
+            ClassDefense.initialize(new com.himitsu.secret.config.SecretConfig("mixin",false));
             throw new AssertionError("Startup accepted an unavailable native bridge");
         } catch (IllegalStateException expected) {}
         Field bridgeLoaded=com.himitsu.secret.bridge.SecretNative.class.getDeclaredField("loaded");
@@ -273,7 +446,7 @@ public final class TargetGuardCheck {
         try {
             bridgeLoaded.setBoolean(null,true);
             // No native endpoint is installed: any hidden VM scan/call would fail this check.
-            ClassDefense.initialize(new com.himitsu.secret.config.SecretConfig("mixin",false),Map.of());
+            ClassDefense.initialize(new com.himitsu.secret.config.SecretConfig("mixin",false));
         } finally { bridgeLoaded.setBoolean(null,false); }
         check(!com.himitsu.secret.bridge.SecretNative.isLoaded(),"policy preparation must not load or invoke native code");
         HookRegistry.register(TargetGuardCheck.class);
@@ -301,6 +474,6 @@ public final class TargetGuardCheck {
         checkWeaponEntries();
         checkR14();
         checkLeanReads();
-        System.out.println("TARGET_GUARDS_PASS native_tick_swap identity_snapshot_no_auth bounded_weapon_scan new_instance scope_normal scope_throw production_hook_targets exact_identity_index startup_prepare_without_native left_swing_geometry attack_and_swing_before_cancel repeat_weave_once owner_session_localchannel fakeplayer multipart_cycle cursor_transfer_weapon_recovery entry_uuid MODEL_NO_GAME");
+        System.out.println("TARGET_GUARDS_PASS owner_raw_motion_repair r16_ready_clone session_isolation attribute_index write_guards section_repair retry_budget indexed_residuals unload_barrier native_tick_swap identity_snapshot_no_auth bounded_weapon_scan new_instance scope_normal scope_throw production_hook_targets exact_identity_index startup_prepare_without_native left_swing_geometry attack_and_swing_before_cancel repeat_weave_once owner_session_localchannel fakeplayer multipart_cycle cursor_transfer_weapon_recovery entry_uuid MODEL_NO_GAME");
     }
 }

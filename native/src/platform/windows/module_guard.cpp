@@ -2,6 +2,7 @@
 
 #include "himitsu/core/native_log.hpp"
 #include "himitsu/platform/windows/swap_buffers_hook.hpp"
+#include "himitsu/platform/windows/thread_guard.hpp"
 
 #include <windows.h>
 #include <psapi.h>
@@ -21,6 +22,8 @@ struct TableSnapshot {
     unsigned char* base = nullptr;
     DWORD size = 0;
     unsigned char* original = nullptr;
+    bool restore_suspended = false;
+    ULONGLONG next_report = 0;
     unsigned long long restore_count = 0;
 };
 
@@ -205,26 +208,21 @@ void initialize_glfw_export() {
 }
 
 void restore_table(TableSnapshot& snapshot) {
-    if (snapshot.base == nullptr || snapshot.original == nullptr || snapshot.size == 0) return;
+    if (snapshot.restore_suspended || !snapshot.base || !snapshot.original || !snapshot.size) return;
     if (std::memcmp(snapshot.base, snapshot.original, snapshot.size) == 0) return;
-    DWORD first_difference = 0;
-    while (first_difference < snapshot.size
-        && snapshot.base[first_difference] == snapshot.original[first_difference]) {
-        ++first_difference;
+    const auto now = GetTickCount64();
+    const bool report = now >= snapshot.next_report;
+    if (report) {
+        DWORD offset = 0;
+        while (offset < snapshot.size && snapshot.base[offset] == snapshot.original[offset]) ++offset;
+        HIMITSU_LOG_WARNING("ModuleGuard", "检测到表内容变化：%s（基址=%p，首个差异偏移=0x%lX）",
+            snapshot.name, snapshot.base, offset);
+        snapshot.next_report = now + 10000;
     }
-    HIMITSU_LOG_WARNING(
-        "ModuleGuard",
-        "检测到表内容变化：%s（基址=%p，首个差异偏移=0x%lX，当前=0x%02X，基线=0x%02X）",
-        snapshot.name,
-        snapshot.base,
-        first_difference,
-        snapshot.base[first_difference],
-        snapshot.original[first_difference]
-    );
     const bool restored = protected_write(snapshot.base, snapshot.original, snapshot.size);
     if (restored) ++snapshot.restore_count;
-    HIMITSU_LOG_INFO("ModuleGuard", "表恢复结束：%s（成功=%s，累计恢复=%llu）",
-        snapshot.name, restored ? "是" : "否", snapshot.restore_count);
+    if (report) HIMITSU_LOG_INFO("ModuleGuard", "表恢复结束：%s（成功=%s，累计恢复=%llu）",
+        snapshot.name, restored ? "是" : "失败", snapshot.restore_count);
 }
 
 void restore_export(ExportSnapshot& snapshot) {
@@ -447,6 +445,13 @@ bool suspend_export_restore(const char* module_name, const char* export_name, bo
     return success;
 }
 
+void suspend_jvmti_table_restore(bool suspended) {
+    // The lock only changes native state; callers release it before any JVMTI call.
+    AcquireSRWLockExclusive(&guard_lock);
+    jvmti_table.restore_suspended = suspended;
+    ReleaseSRWLockExclusive(&guard_lock);
+}
+
 bool start_module_guard(JavaVM* vm, jvmtiEnv* jvmti) {
     HIMITSU_LOG_INFO("ModuleGuard", "正在启动表与导出函数守护（vm=%p，jvmti=%p）", vm, jvmti);
     bool expected = false;
@@ -490,30 +495,33 @@ bool start_module_guard(JavaVM* vm, jvmtiEnv* jvmti) {
     }
 
     stop_requested.store(false, std::memory_order_release);
-    guard_thread = CreateThread(nullptr, 0, guard_worker, nullptr, 0, nullptr);
+    guard_thread = CreateThread(nullptr, 0, guard_worker, nullptr, CREATE_SUSPENDED, nullptr);
     if (guard_thread == nullptr) {
         HIMITSU_LOG_ERROR("ModuleGuard", "模块守护 CreateThread 调用失败（错误码=%lu）", GetLastError());
         running.store(false, std::memory_order_release);
         return false;
     }
+    if(!register_native_thread(guard_thread) || ResumeThread(guard_thread)==static_cast<DWORD>(-1)) {
+        stop_requested.store(true,std::memory_order_release);ResumeThread(guard_thread);
+        if(WaitForSingleObject(guard_thread,5000)==WAIT_OBJECT_0) {
+            unregister_native_thread(guard_thread);CloseHandle(guard_thread);guard_thread=nullptr;
+        }
+        HIMITSU_LOG_ERROR("ModuleGuard","Guard OS protection/launch failed");return false;
+    }
     HIMITSU_LOG_INFO("ModuleGuard", "表与导出函数守护已启动（线程=%p）", guard_thread);
     return true;
 }
 
-void stop_module_guard() {
-    if (!running.load(std::memory_order_acquire)) {
-        HIMITSU_LOG_DEBUG("ModuleGuard", "模块守护停止请求已忽略：当前未运行");
-        return;
+void request_module_guard_stop() {stop_requested.store(true,std::memory_order_release);}
+bool stop_module_guard(std::uint64_t deadline) {
+    request_module_guard_stop();
+    HANDLE thread=guard_thread;
+    if(thread) {
+        auto now=GetTickCount64();
+        DWORD result=WaitForSingleObject(thread,static_cast<DWORD>(now<deadline?deadline-now:0));
+        if(result!=WAIT_OBJECT_0) {HIMITSU_LOG_ERROR("ModuleGuard","Guard did not exit; state retained: %lu",result);return false;}
+        unregister_native_thread(thread);CloseHandle(thread);guard_thread=nullptr;
     }
-    HIMITSU_LOG_INFO("ModuleGuard", "正在停止模块守护（线程=%p）", guard_thread);
-    stop_requested.store(true, std::memory_order_release);
-    HANDLE thread = guard_thread;
-    if (thread != nullptr) {
-        const DWORD wait_result = WaitForSingleObject(thread, 5000);
-        HIMITSU_LOG_INFO("ModuleGuard", "模块守护线程等待结束（结果=0x%lX）", wait_result);
-        CloseHandle(thread);
-        guard_thread = nullptr;
-    }
-    running.store(false, std::memory_order_release);
+    running.store(false,std::memory_order_release);return true;
 }
 }

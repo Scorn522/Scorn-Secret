@@ -45,6 +45,7 @@ public final class EventBusTakeover {
         register(PlayerEvent.PlayerRespawnEvent.class, NetworkLifecycle.PlayerSync::playerRespawn);
         register(ItemTossEvent.class, CivilizationSurvival::itemToss);
         register(LevelEvent.Unload.class, SecretEntityLifecycle::levelUnload);
+        register(net.minecraftforge.event.entity.EntityLeaveLevelEvent.class, SecretEntityLifecycle::entityLeft);
         register(TickEvent.LevelTickEvent.class, CivilizationSurvival::levelTick);
         if (FMLEnvironment.dist == Dist.CLIENT) {
             register(TickEvent.ClientTickEvent.class, event -> {

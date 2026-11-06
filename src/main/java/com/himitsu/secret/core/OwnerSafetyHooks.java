@@ -14,6 +14,31 @@ import net.minecraft.network.protocol.game.ServerboundSetCreativeModeSlotPacket;
 import net.minecraft.nbt.ListTag;
 import net.minecraftforge.common.util.ITeleporter;
 public final class OwnerSafetyHooks {
+    @AsmHook(targetClass="net/minecraft/world/entity/Entity", targetMethod="remove", targetAliases="m_142687_", targetDescriptor="(Lnet/minecraft/world/entity/Entity$RemovalReason;)V", mode=HookMode.GUARD, includeThis=true)
+    @AsmHook(targetClass="net/minecraft/world/entity/Entity", targetMethod="setRemoved", targetAliases="m_142467_", targetDescriptor="(Lnet/minecraft/world/entity/Entity$RemovalReason;)V", mode=HookMode.GUARD, includeThis=true)
+    public static boolean removal(Entity entity,Entity.RemovalReason reason) { return kill(entity); }
+    @AsmHook(targetClass="net/minecraft/world/entity/Entity", targetMethod="kill", targetAliases="m_6074_", targetDescriptor="()V", mode=HookMode.GUARD, includeThis=true)
+    public static boolean kill(Entity entity) {
+        return OwnerSafety.owns(entity) && AuthoritativeEntityTopology.open(entity.level())
+            && !OwnerSafety.inLifecycle((Player)entity) && !DeathExecution.isMarked(entity);
+    }
+    @AsmHook(targetClass="net/minecraft/world/entity/LivingEntity", targetMethod="setHealth", targetAliases="m_21153_", targetDescriptor="(F)V", mode=HookMode.GUARD, includeThis=true)
+    public static boolean health(LivingEntity entity,float value) {
+        if(!AuthoritativeEntityTopology.open(entity.level())) return false;
+        float fixed;
+        if(CivilizationSurvival.shouldDeath(entity)) fixed=0.0F;
+        else if(kill(entity) && (!Float.isFinite(value) || value<20.0F)) fixed=20.0F;
+        else return false;
+        var data=entity.getEntityData(); var item=data.itemsById.get(LivingEntity.DATA_HEALTH_ID.getId());
+        if(item!=null && ((Float)item.getValue()).floatValue()!=fixed) data.set(LivingEntity.DATA_HEALTH_ID,fixed);
+        return true;
+    }
+    @AsmHook(targetClass="net/minecraft/world/entity/LivingEntity", targetMethod="heal", targetAliases="m_5634_", targetDescriptor="(F)V", mode=HookMode.GUARD, includeThis=true)
+    public static boolean heal(LivingEntity entity,float amount) { return revive(entity); }
+    @AsmHook(targetClass="net/minecraft/world/entity/Entity", targetMethod="revive", targetDescriptor="()V", mode=HookMode.GUARD, includeThis=true)
+    public static boolean revive(Entity entity) { return AuthoritativeEntityTopology.open(entity.level()) && CivilizationSurvival.shouldDeath(entity); }
+    @AsmHook(targetClass="net/minecraft/server/players/PlayerList", targetMethod="respawn", targetAliases="m_11236_", targetDescriptor="(Lnet/minecraft/server/level/ServerPlayer;Z)Lnet/minecraft/server/level/ServerPlayer;", mode=HookMode.SCOPE, includeThis=true)
+    public static void respawn(PlayerList list,ServerPlayer player,boolean keepEverything,boolean enter) { OwnerSafety.lifecycle(player,enter,true); }
     @AsmHook(targetClass="net/minecraft/network/Connection", targetMethod="channelInactive", targetDescriptor="(Lio/netty/channel/ChannelHandlerContext;)V", mode=HookMode.HEAD, includeThis=true)
     public static void disconnected(net.minecraft.network.Connection connection,io.netty.channel.ChannelHandlerContext context) { OwnerSafety.connectionClosed(connection); }
     @AsmHook(targetClass="net/minecraft/world/entity/Entity", targetMethod="setPos", targetAliases="m_6034_", targetDescriptor="(DDD)V", mode=HookMode.GUARD, includeThis=true)

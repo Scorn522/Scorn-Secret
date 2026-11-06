@@ -4,6 +4,8 @@
 #include "himitsu/jvm/class_control.hpp"
 #include "himitsu/platform/windows/directx_overlay_assets.hpp"
 #include "himitsu/platform/windows/module_guard.hpp"
+#include "himitsu/platform/windows/thread_guard.hpp"
+#include "himitsu/core/runtime_state.hpp"
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -135,7 +137,7 @@ public:
 void observe_directx_target(HDC device_context);
 void observe_directx_process_target();
 void ensure_directx_overlay();
-void stop_directx_overlay();
+bool stop_directx_overlay(std::uint64_t deadline);
 
 bool install_inline_hook(InlineHook& hook, void* target, void* replacement, void** original) {
     if (hook.active) {
@@ -145,16 +147,16 @@ bool install_inline_hook(InlineHook& hook, void* target, void* replacement, void
     if (target == nullptr || replacement == nullptr || target == replacement) return false;
 
     if (!minhook_initialized) return false;
-    void* trampoline = nullptr;
-    const MH_STATUS create_status = MH_CreateHook(target, replacement, &trampoline);
-    if (create_status != MH_OK) return false;
-    const MH_STATUS enable_status = MH_EnableHook(target);
-    if (enable_status != MH_OK && enable_status != MH_ERROR_ENABLED) {
-        MH_RemoveHook(target);
-        return false;
+    void* trampoline=hook.trampoline;
+    if(trampoline && hook.target!=target) return false;
+    if(!trampoline) {
+        if(MH_CreateHook(target,replacement,&trampoline)!=MH_OK) return false;
+        hook.target=target;hook.trampoline=trampoline;
     }
-    hook.target = target;
-    hook.trampoline = trampoline;
+    if(original) *original=trampoline;
+    MH_STATUS enable_status;
+    { himitsu::platform::windows::ThreadHookMaintenance scope; enable_status=MH_EnableHook(target); }
+    if(enable_status!=MH_OK && enable_status!=MH_ERROR_ENABLED) return false;
     hook.active = true;
     const std::string base_name = hook.name == nullptr ? "原生渲染入口" : hook.name;
     hook.target_guard = himitsu::platform::windows::register_guarded_region(
@@ -175,17 +177,22 @@ bool install_inline_hook(InlineHook& hook, void* target, void* replacement, void
     return true;
 }
 
-void uninstall_inline_hook(InlineHook& hook) {
-    if (!hook.active || hook.target == nullptr) return;
+bool uninstall_inline_hook(InlineHook& hook) {
+    if(!hook.active || !hook.target) return true;
+    MH_STATUS status;
+    { himitsu::platform::windows::ThreadHookMaintenance scope;status=MH_DisableHook(hook.target); }
+    if(status!=MH_OK && status!=MH_ERROR_DISABLED) return false;
     himitsu::platform::windows::unregister_guarded_region(hook.detour_guard);
     himitsu::platform::windows::unregister_guarded_region(hook.trampoline_guard);
     himitsu::platform::windows::unregister_guarded_region(hook.hotpatch_guard);
     himitsu::platform::windows::unregister_guarded_region(hook.target_guard);
-    MH_DisableHook(hook.target);
-    MH_RemoveHook(hook.target);
-    const char* name = hook.name;
-    hook = InlineHook{name};
+    hook.active=false; // Retain the trampoline and original function for in-flight detours.
+    return true;
 }
+struct NativeDraw {
+    bool entered=himitsu::core::RuntimeState::instance().enter_call();
+    ~NativeDraw() {if(entered) himitsu::core::RuntimeState::instance().leave_call();}
+};
 
 bool valid_gl_address(PROC address) {
     const auto value = reinterpret_cast<std::uintptr_t>(address);
@@ -289,6 +296,7 @@ void APIENTRY hooked_gl_blit_framebuffer_ext(
 }
 
 PROC WINAPI hooked_wgl_get_proc_address(LPCSTR name) {
+    NativeDraw call; if(!call.entered) {return original_wgl_get_proc_address?original_wgl_get_proc_address(name):nullptr;}
     if (original_wgl_get_proc_address == nullptr) return nullptr;
     PROC result = original_wgl_get_proc_address(name);
     if (name == nullptr || !valid_gl_address(result)) return result;
@@ -411,6 +419,7 @@ void render_front_overlay(jlong context) {
 }
 
 BOOL WINAPI hooked_swap_buffers(HDC device_context) {
+    NativeDraw call; if(!call.entered) {return original_swap_buffers?original_swap_buffers(device_context):FALSE;}
     observe_directx_target(device_context);
     const bool outermost = swap_depth++ == 0;
     if (outermost) {
@@ -435,6 +444,7 @@ BOOL WINAPI hooked_swap_buffers(HDC device_context) {
 }
 
 void __cdecl hooked_glfw_swap_buffers(void* window) {
+    NativeDraw call; if(!call.entered) {if(original_glfw_swap_buffers) original_glfw_swap_buffers(window);return;}
     observe_directx_process_target();
     const bool outermost = swap_depth++ == 0;
     if (outermost) {
@@ -454,6 +464,7 @@ void __cdecl hooked_glfw_swap_buffers(void* window) {
 }
 
 BOOL WINAPI hooked_wgl_swap_layer_buffers(HDC device_context, UINT planes) {
+    NativeDraw call; if(!call.entered) {return original_wgl_swap_layer_buffers?original_wgl_swap_layer_buffers(device_context,planes):FALSE;}
     observe_directx_target(device_context);
     const bool outermost = swap_depth++ == 0;
     if (outermost) {
@@ -478,6 +489,7 @@ BOOL WINAPI hooked_wgl_swap_layer_buffers(HDC device_context, UINT planes) {
 }
 
 BOOL WINAPI hooked_ntgdi_swap_buffers(HDC device_context) {
+    NativeDraw call; if(!call.entered) {return original_ntgdi_swap_buffers?original_ntgdi_swap_buffers(device_context):FALSE;}
     observe_directx_target(device_context);
     const bool outermost = swap_depth++ == 0;
     if (outermost) {
@@ -924,6 +936,7 @@ DWORD WINAPI directx_overlay_worker(void*) {
 
 void ensure_directx_overlay() {
     AcquireSRWLockExclusive(&directx_overlay_lifecycle_lock);
+    if(himitsu::core::RuntimeState::instance().shutting_down()) {ReleaseSRWLockExclusive(&directx_overlay_lifecycle_lock);return;}
     HANDLE existing = directx_overlay_thread.load(std::memory_order_relaxed);
     if (existing != nullptr && WaitForSingleObject(existing, 0) == WAIT_OBJECT_0) {
         CloseHandle(existing);
@@ -938,17 +951,22 @@ void ensure_directx_overlay() {
     ReleaseSRWLockExclusive(&directx_overlay_lifecycle_lock);
 }
 
-void stop_directx_overlay() {
+bool stop_directx_overlay(std::uint64_t deadline) {
     AcquireSRWLockExclusive(&directx_overlay_lifecycle_lock);
-    HANDLE thread = directx_overlay_thread.exchange(nullptr, std::memory_order_acq_rel);
-    directx_overlay_stop.store(true, std::memory_order_release);
-    HWND window = directx_overlay_window.load(std::memory_order_acquire);
-    if (window != nullptr) PostMessageW(window, WM_CLOSE, 0, 0);
+    HANDLE thread=directx_overlay_thread.load(std::memory_order_acquire);
+    directx_overlay_stop.store(true,std::memory_order_release);
+    HWND window=directx_overlay_window.load(std::memory_order_acquire);
     ReleaseSRWLockExclusive(&directx_overlay_lifecycle_lock);
-    if (thread != nullptr) {
-        WaitForSingleObject(thread, INFINITE);
+    if(window) PostMessageW(window,WM_CLOSE,0,0);
+    if(thread) {
+        auto now=GetTickCount64();
+        if(WaitForSingleObject(thread,static_cast<DWORD>(now<deadline?deadline-now:0))!=WAIT_OBJECT_0) return false;
+        AcquireSRWLockExclusive(&directx_overlay_lifecycle_lock);
+        directx_overlay_thread.store(nullptr,std::memory_order_release);
+        ReleaseSRWLockExclusive(&directx_overlay_lifecycle_lock);
         CloseHandle(thread);
     }
+    return true;
 }
 
 void observe_directx_target(HDC device_context) {
@@ -972,6 +990,7 @@ HRESULT WINAPI hooked_d3d9_present(
     HWND override_window,
     const RGNDATA* dirty_region
 ) {
+    NativeDraw call; if(!call.entered) return original_d3d9_present?original_d3d9_present(device,source,destination,override_window,dirty_region):D3D_OK;
     if (device == directx_overlay_device.load(std::memory_order_acquire)) {
         const bool death_active = !invoke_layer(
             true,
@@ -1000,6 +1019,7 @@ HRESULT WINAPI hooked_d3d9_present(
 }
 
 HRESULT WINAPI hooked_dxgi_present(IDXGISwapChain* swap_chain, UINT sync_interval, UINT flags) {
+    NativeDraw call; if(!call.entered) {return original_dxgi_present?original_dxgi_present(swap_chain,sync_interval,flags):S_OK;}
     const bool death_active = !invoke_layer(
         true,
         stage_dxgi_present,
@@ -1401,7 +1421,8 @@ void maintain_swap_buffers_hook() {
     };
     for (InlineHook* hook : hooks) {
         if (hook == nullptr || !hook->active || hook->target == nullptr) continue;
-        const MH_STATUS status = MH_EnableHook(hook->target);
+        MH_STATUS status;
+        { ThreadHookMaintenance scope;status=MH_EnableHook(hook->target); }
         if (status != MH_OK && status != MH_ERROR_ENABLED) {
             HIMITSU_LOG_WARNING(
                 "Render",
@@ -1430,22 +1451,23 @@ void maintain_swap_buffers_hook() {
     install_export_hooks(modules);
 }
 
-void uninstall_swap_buffers_hook() {
-    HookLock lock;
-    hook_maintenance_enabled.store(false, std::memory_order_release);
-    stop_directx_overlay();
+bool uninstall_swap_buffers_hook(std::uint64_t deadline) {
+    hook_maintenance_enabled.store(false,std::memory_order_release);
+    if(!stop_directx_overlay(deadline) || GetTickCount64()>deadline) return false;
     himitsu::platform::windows::directx_assets::release_all();
-    uninstall_inline_hook(dxgi_present_inline);
-    uninstall_inline_hook(d3d9_present_inline);
-    uninstall_inline_hook(blit_framebuffer_ext_inline);
-    uninstall_inline_hook(bind_framebuffer_ext_inline);
-    uninstall_inline_hook(blit_framebuffer_inline);
-    uninstall_inline_hook(bind_framebuffer_inline);
-    uninstall_inline_hook(ntgdi_inline);
-    uninstall_inline_hook(wgl_layer_inline);
-    uninstall_inline_hook(wgl_get_proc_inline);
-    uninstall_inline_hook(glfw_inline);
-    uninstall_inline_hook(gdi_inline);
+    HookLock lock;
+    bool complete=true;
+    complete=uninstall_inline_hook(dxgi_present_inline) && complete;
+    complete=uninstall_inline_hook(d3d9_present_inline) && complete;
+    complete=uninstall_inline_hook(blit_framebuffer_ext_inline) && complete;
+    complete=uninstall_inline_hook(bind_framebuffer_ext_inline) && complete;
+    complete=uninstall_inline_hook(blit_framebuffer_inline) && complete;
+    complete=uninstall_inline_hook(bind_framebuffer_inline) && complete;
+    complete=uninstall_inline_hook(ntgdi_inline) && complete;
+    complete=uninstall_inline_hook(wgl_layer_inline) && complete;
+    complete=uninstall_inline_hook(wgl_get_proc_inline) && complete;
+    complete=uninstall_inline_hook(glfw_inline) && complete;
+    complete=uninstall_inline_hook(gdi_inline) && complete;
     if (gdi_guard_suspended) {
         himitsu::platform::windows::suspend_export_restore(
             "gdi32.dll", "SwapBuffers", false
@@ -1461,28 +1483,18 @@ void uninstall_swap_buffers_hook() {
             *iterator->slot = iterator->original;
             DWORD ignored = 0;
             VirtualProtect(iterator->slot, sizeof(void*), old_protection, &ignored);
-        }
+        } else complete=false;
     }
+    if(!complete) return false;
     import_patches.clear();
-    original_swap_buffers = nullptr;
-    original_glfw_swap_buffers = nullptr;
-    original_wgl_swap_layer_buffers = nullptr;
-    original_ntgdi_swap_buffers = nullptr;
-    original_wgl_get_proc_address = nullptr;
-    original_gl_bind_framebuffer = nullptr;
-    original_gl_blit_framebuffer = nullptr;
-    original_gl_bind_framebuffer_ext = nullptr;
-    original_gl_blit_framebuffer_ext = nullptr;
-    original_d3d9_present = nullptr;
-    original_dxgi_present = nullptr;
+    // Late detours must still be able to call their original functions.
     context_hooks_ready.store(false, std::memory_order_release);
     last_hook_maintenance.store(0, std::memory_order_release);
     last_directx_probe.store(0, std::memory_order_release);
     directx_target_window.store(nullptr, std::memory_order_release);
-    // Thread guards share this backend and retain three disabled trampolines
-    // for calls already inside a detour. Remove our own render hooks above,
-    // but do not free another component's trampoline pool at shutdown.
+    // All successfully enabled trampolines remain allocated until process exit.
     minhook_initialized = false;
-    HIMITSU_LOG_INFO("Render", "多层原生渲染入口已卸载");
+    HIMITSU_LOG_INFO("Render", "Native render entries disabled; trampolines retained");
+    return true;
 }
 }

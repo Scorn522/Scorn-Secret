@@ -11,6 +11,7 @@
 #include "himitsu/validation/validation_gate.hpp"
 
 #include <algorithm>
+#include <array>
 #include <string>
 #include <vector>
 #include <windows.h>
@@ -62,7 +63,7 @@ jobject decrypt_payload(JNIEnv* env, jbyteArray input, bool class_payload) {
     const jsize input_length = env->GetArrayLength(input);
     std::vector<unsigned char> encrypted(static_cast<std::size_t>(input_length));
     env->GetByteArrayRegion(input, 0, input_length, reinterpret_cast<jbyte*>(encrypted.data()));
-    constexpr unsigned char magic[] = {'H', 'S', 'P', '2'};
+    constexpr unsigned char magic[] = {'H', 'S', 'P', '3'};
     if (!std::equal(std::begin(magic), std::end(magic), encrypted.begin())) {
         return himitsu::jvm::new_exception(env, "java/lang/IllegalArgumentException", "Unsupported encrypted payload format");
     }
@@ -72,6 +73,7 @@ jobject decrypt_payload(JNIEnv* env, jbyteArray input, bool class_payload) {
     BCRYPT_ALG_HANDLE aes = nullptr;
     BCRYPT_KEY_HANDLE key = nullptr;
     std::vector<unsigned char> key_bytes(32);
+    std::array<unsigned char,32> prk{};
     std::vector<unsigned char> hash_object;
     std::vector<unsigned char> key_object;
     std::vector<unsigned char> plaintext(encrypted.size() - header_size - tag_size);
@@ -89,25 +91,20 @@ jobject decrypt_payload(JNIEnv* env, jbyteArray input, bool class_payload) {
     do {
         DWORD object_size = 0;
         DWORD result_size = 0;
-        if (BCryptOpenAlgorithmProvider(&sha, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0
+        if (BCryptOpenAlgorithmProvider(&sha, BCRYPT_SHA256_ALGORITHM, nullptr, BCRYPT_ALG_HANDLE_HMAC_FLAG) < 0
             || BCryptGetProperty(sha, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&object_size), sizeof(object_size), &result_size, 0) < 0) break;
         hash_object.resize(object_size);
-        if (BCryptCreateHash(sha, &hash, hash_object.data(), object_size, nullptr, 0, 0) < 0) break;
-        constexpr unsigned char separator = 0;
-        constexpr unsigned char outer_purpose[] = {'o','u','t','e','r'};
-        constexpr unsigned char class_purpose[] = {'c','l','a','s','s'};
-        const unsigned char* purpose = class_payload ? class_purpose : outer_purpose;
-        const ULONG purpose_size = class_payload ? sizeof(class_purpose) : sizeof(outer_purpose);
-        if (BCryptHashData(
-                hash,
-                reinterpret_cast<PUCHAR>(payload_secret.data()),
-                static_cast<ULONG>(payload_secret.size()),
-                0
-            ) < 0
-            || BCryptHashData(hash, const_cast<PUCHAR>(&separator), 1, 0) < 0
-            || BCryptHashData(hash, const_cast<PUCHAR>(purpose), purpose_size, 0) < 0
-            || BCryptHashData(hash, const_cast<PUCHAR>(&separator), 1, 0) < 0
-            || BCryptHashData(hash, encrypted.data() + magic_size, salt_size, 0) < 0
+        // HKDF-Extract(salt, IKM), then Expand(PRK, purpose/release || 0x01).
+        if (BCryptCreateHash(sha, &hash, hash_object.data(), object_size,
+                encrypted.data()+magic_size, static_cast<ULONG>(salt_size), 0) < 0
+            || BCryptHashData(hash, reinterpret_cast<PUCHAR>(payload_secret.data()), static_cast<ULONG>(payload_secret.size()), 0) < 0
+            || BCryptFinishHash(hash, prk.data(), static_cast<ULONG>(prk.size()), 0) < 0) break;
+        BCryptDestroyHash(hash); hash=nullptr;
+        const std::string info=std::string("Secret/HSP3/")+(class_payload?"class/":"outer/")+HIMITSU_PACKAGE_VERSION;
+        unsigned char block=1;
+        if (BCryptCreateHash(sha, &hash, hash_object.data(), object_size, prk.data(), static_cast<ULONG>(prk.size()), 0) < 0
+            || BCryptHashData(hash, reinterpret_cast<PUCHAR>(const_cast<char*>(info.data())), static_cast<ULONG>(info.size()), 0) < 0
+            || BCryptHashData(hash, &block, 1, 0) < 0
             || BCryptFinishHash(hash, key_bytes.data(), static_cast<ULONG>(key_bytes.size()), 0) < 0) break;
 
         if (BCryptOpenAlgorithmProvider(&aes, BCRYPT_AES_ALGORITHM, nullptr, 0) < 0
@@ -136,7 +133,11 @@ jobject decrypt_payload(JNIEnv* env, jbyteArray input, bool class_payload) {
     if (hash != nullptr) BCryptDestroyHash(hash);
     if (sha != nullptr) BCryptCloseAlgorithmProvider(sha, 0);
     SecureZeroMemory(payload_secret.data(), payload_secret.size());
-    if (!ok) return himitsu::jvm::new_exception(env, "java/lang/SecurityException", "Payload authentication failed");
+    SecureZeroMemory(prk.data(),prk.size());
+    SecureZeroMemory(key_bytes.data(),key_bytes.size());
+    if(!hash_object.empty()) SecureZeroMemory(hash_object.data(),hash_object.size());
+    if(!key_object.empty()) SecureZeroMemory(key_object.data(),key_object.size());
+    if (!ok) return himitsu::jvm::new_exception(env, "java/lang/SecurityException", "Payload authentication or package version mismatch");
     if (class_payload && !himitsu::jvm::remember_owned_image(plaintext.data(),plaintext.size()))
         return himitsu::jvm::new_exception(env,"java/lang/SecurityException","Authenticated class conflicts with its source image");
     jbyteArray output = env->NewByteArray(static_cast<jsize>(plaintext.size()));
@@ -371,7 +372,7 @@ jobject dispatch_command(JNIEnv* env, jstring command_value, jobjectArray argume
     }
     if (command == "Shutdown") {
         if (!RuntimeState::instance().shutdown(env)) {
-            return himitsu::jvm::new_exception(env, "java/lang/IllegalStateException", "Cannot shut down from a nested native callback");
+            return himitsu::jvm::new_exception(env, "java/lang/IllegalStateException", "Native shutdown incomplete; resources retained; see native log for callback, worker, hook or deadline failure");
         }
         return boolean_value(env, true);
     }

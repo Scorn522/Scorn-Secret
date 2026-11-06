@@ -24,13 +24,61 @@ public final class TargetCleanup {
         }
     };
     private static Set<String> appliedBossBars=Set.of();
+    private static final WeakTargetSet<Entity> INCOMPLETE=new WeakTargetSet<>(), QUEUED=new WeakTargetSet<>(), EXHAUSTED=new WeakTargetSet<>(), DISPATCHED=new WeakTargetSet<>();
+    private static volatile Map<net.minecraft.world.level.Level,ArrayDeque<Map.Entry<java.lang.ref.WeakReference<Entity>,int[]>>> queues=new IdentityHashMap<>();
     private TargetCleanup() {}
-    static void clean(Entity target) {
-        if(target.level() instanceof ServerLevel server && !server.getServer().isSameThread()) {
-            server.getServer().execute(()->clean(target)); return;
+    static boolean isIncomplete(Entity target) { return INCOMPLETE.contains(target); }
+    static boolean clean(Entity target) {
+        if(!(target.level() instanceof ServerLevel level) || !AuthoritativeEntityTopology.open(level)) return true;
+        if(!level.getServer().isSameThread()) {
+            INCOMPLETE.add(target,level);
+            if(DISPATCHED.add(target,level)) level.getServer().tell(new net.minecraft.server.TickTask(level.getServer().getTickCount(),()-> {
+                DISPATCHED.remove(target);
+                if(target.level()==level && AuthoritativeEntityTopology.open(level) && CivilizationSurvival.shouldDeath(target)) clean(target);
+            }));
+            return false;
         }
-        if(!(target.level() instanceof ServerLevel server)) return;
+        EXHAUSTED.remove(target);
+        boolean complete=attempt(target);
+        if(complete) INCOMPLETE.remove(target);
+        else { INCOMPLETE.add(target,level); requestRetry(target); }
+        return complete;
+    }
+    static void requestRetry(Entity target) {
+        if(!INCOMPLETE.contains(target) || EXHAUSTED.contains(target) || QUEUED.contains(target)
+            || !(target.level() instanceof ServerLevel level) || !AuthoritativeEntityTopology.open(level)) return;
+        if(!level.getServer().isSameThread()) {
+            if(DISPATCHED.add(target,level)) level.getServer().tell(new net.minecraft.server.TickTask(level.getServer().getTickCount(),()-> {
+                DISPATCHED.remove(target); if(target.level()==level) requestRetry(target);
+            }));
+            return;
+        }
+        if(QUEUED.add(target,level)) queue(level).add(new AbstractMap.SimpleEntry<>(new java.lang.ref.WeakReference<>(target),new int[]{0,level.getServer().getTickCount()+20}));
+    }
+    private static synchronized ArrayDeque<Map.Entry<java.lang.ref.WeakReference<Entity>,int[]>> queue(ServerLevel level) {
+        var q=queues.get(level); if(q!=null) return q;
+        q=new ArrayDeque<>(); var next=new IdentityHashMap<>(queues); next.put(level,q); queues=next; return q;
+    }
+    static void retryPending(ServerLevel level) {
+        if(!AuthoritativeEntityTopology.open(level)) return;
+        var q=queues.get(level); if(q==null || q.isEmpty()) return;
+        var entry=q.peek(); int[] state=entry.getValue(); int now=level.getServer().getTickCount();
+        if(now-state[1]<0) return;
+        q.remove(); Entity target=entry.getKey().get();
+        if(target==null) return;
+        if(target.level()!=level || !CivilizationSurvival.shouldDeath(target) || !INCOMPLETE.contains(target)) { QUEUED.remove(target); return; }
+        if(attempt(target)) { INCOMPLETE.remove(target); QUEUED.remove(target); return; }
+        if(++state[0]>=3) { EXHAUSTED.add(target,level); QUEUED.remove(target); return; }
+        state[1]=now+20; q.add(entry);
+    }
+    static synchronized void clearLevel(net.minecraft.world.level.Level level) {
+        var next=new IdentityHashMap<>(queues); next.remove(level); queues=next;
+        INCOMPLETE.clearScope(level); QUEUED.clearScope(level); EXHAUSTED.clearScope(level); DISPATCHED.clearScope(level);
+    }
+    private static boolean attempt(Entity target) {
+        if(!(target.level() instanceof ServerLevel server) || !AuthoritativeEntityTopology.open(server)) return false;
         Cleaner cleaner=new Cleaner(target);
+        try {
         // Only statics declared by the actual target hierarchy. Shared framework classes are excluded.
         for(Class<?> c=target.getClass();c!=null && c!=Entity.class;c=c.getSuperclass()) {
             if(c.getName().startsWith("net.minecraft.")) break;
@@ -50,7 +98,9 @@ public final class TargetCleanup {
             ids.addAll(cleaner.bars); RuntimeSyncState.TARGET_BOSS_BARS.replace(ids);
             if(SecretNetwork.isInitialized()) SecretNetwork.sendAll(RuntimeSyncState.TARGET_BOSS_BARS);
         }
+        } catch(RuntimeException error) { cleaner.failures++; }
         if(cleaner.failures>0) System.err.println("[Secret/TargetCleanup] partial target="+target.uuid+" inaccessible-or-changing-fields="+cleaner.failures);
+        return cleaner.failures==0;
     }
     public static void applyBossRemovals() {
         Set<String> ids=RuntimeSyncState.TARGET_BOSS_BARS.snapshot();

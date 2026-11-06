@@ -73,11 +73,12 @@ public final class BootstrapPayload {
                 "boot",
                 IEventBus.class,
                 Path.class,
-                Path.class,
-                Map.class
-            ).invoke(null, modBus, gameDirectory, modPath, Map.copyOf(classes));
+                Path.class
+            ).invoke(null, modBus, gameDirectory, modPath);
         } catch (java.lang.reflect.InvocationTargetException exception) {
             throw exception.getCause();
+        } finally {
+            classes.clear();
         }
     }
 

@@ -6,11 +6,9 @@ final class SecretThreadProtection {
     private SecretThreadProtection() {
     }
 
-    static void protect(Thread thread) {
-        try {
-            SecretNative.invokeChecked("ProtectThread", thread);
-        } catch (Throwable ignored) {
-        }
+    static boolean protect(Thread thread) {
+        try { return Boolean.TRUE.equals(SecretNative.invokeChecked("ProtectThread",thread)); }
+        catch(Throwable failure) { System.err.println("[Secret/ThreadGuard] Protection failed: "+failure); return false; }
     }
 
     static void unprotect(Thread thread) {

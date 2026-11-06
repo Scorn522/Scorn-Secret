@@ -88,45 +88,128 @@ public final class NativeStartupCheck {
         method.visitCode();method.visitIntInsn(org.objectweb.asm.Opcodes.BIPUSH,value);method.visitInsn(org.objectweb.asm.Opcodes.IRETURN);
         method.visitMaxs(1,0);method.visitEnd();writer.visitEnd();return writer.toByteArray();
     }
+    private static void verifyPackageBinding(Path archive,Path keys) throws Exception {
+        String version;
+        try(var jar=new java.util.jar.JarFile(archive.toFile())) {version=jar.getManifest().getMainAttributes().getValue("Implementation-Version");}
+        String secret=com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(keys)).getAsJsonObject().get("outer").getAsString();
+        Class<?> tool=Class.forName("com.himitsu.secret.tools.SecureJarTool");
+        var field=tool.getDeclaredField("packageVersion");field.setAccessible(true);
+        var encrypt=tool.getDeclaredMethod("encrypt",byte[].class,String.class,String.class);encrypt.setAccessible(true);
+        byte[] plain={7,19,31,43};field.set(null,version);
+        byte[] valid=(byte[])encrypt.invoke(null,plain,secret,"outer");
+        check(java.util.Arrays.equals(plain,(byte[])SecretNative.invokeChecked("DecryptPayloadJar",valid)),"Matching release failed native authentication");
+        field.set(null,version+"-different");
+        byte[] wrongVersion=(byte[])encrypt.invoke(null,plain,secret,"outer");
+        field.set(null,version);
+        byte[] wrongPurpose=(byte[])encrypt.invoke(null,plain,secret,"class");
+        byte[] tampered=valid.clone();tampered[tampered.length-1]^=1;
+        for(byte[] input:new byte[][]{wrongVersion,wrongPurpose,tampered}) {
+            try {SecretNative.invokeChecked("DecryptPayloadJar",input);throw new AssertionError("Mismatched or modified payload accepted");}
+            catch(IllegalStateException rejected) {check(rejected.getCause() instanceof SecurityException,"Unexpected authentication failure: "+rejected);}
+        }
+        System.out.println("PACKAGE_BINDING_PASS native_round_trip wrong_release wrong_purpose changed_tag_rejected");
+    }
+    private static native int createEnvironmentTail(int count);
+    private static void verifyEnvironmentChain(Path directory) throws Exception {
+        check(createEnvironmentTail(320)==320,"Could not construct a real long JVMTI chain");
+        Thread.sleep(2500); // At least two production membership checks; no game is started.
+        check(SecretNative.invokeChecked("DumpClass",EarlyBootstrapService.class) instanceof byte[],"Own JVMTI callback stopped after foreign tail growth");
+        String log=java.nio.file.Files.readString(directory.resolve("secret/native/himitsu-native.log"));
+        check(!log.contains("开始刷新 JVMTI 环境") && !log.contains("JVMTI health unavailable"),"Live own environment was invalidated by the long foreign tail");
+        System.out.println("JVMTI_CHAIN_PASS 320_real_environments own_callbacks_live no_recreation");
+    }
+    private static native boolean probeCallerSuspend();
+    private static native long currentHandle();
+    private static native long copyHandle(long handle,int access);
+    private static native long suspendHandle(long handle,boolean base);
+    private static native long terminateHandle(long handle,boolean base);
+    private static native int resumeHandle(long handle);
+    private static native int threadId(long handle);
+    private static native void closeHandle(long handle);
+    private static native long ordinaryHandle();
+    private static native boolean finishedHandle(long handle);
+    private static void denied(long packed,long result,String message) {
+        check((packed&0xffffffffL)==result && (packed>>>32)==5,message+": "+Long.toHexString(packed));
+    }
     @SuppressWarnings({"deprecation", "removal"})
     private static void verifyThreadGuards() throws Exception {
         var running=new java.util.concurrent.atomic.AtomicBoolean(true);
         var ticks=new java.util.concurrent.atomic.AtomicLong();
+        var handle=new java.util.concurrent.atomic.AtomicLong();
+        var failure=new java.util.concurrent.atomic.AtomicReference<Throwable>();
         var started=new java.util.concurrent.CountDownLatch(1);
         Thread worker=new Thread(() -> {
-            started.countDown();
-            while(running.get()) {
-                ticks.incrementAndGet();
-                java.util.concurrent.locks.LockSupport.parkNanos(1_000_000L);
-            }
-        },"Secret-check-owned-worker");
-        worker.setDaemon(true);worker.start();
-        check(started.await(2,java.util.concurrent.TimeUnit.SECONDS),"Thread fixture did not start");
+            try {
+                handle.set(currentHandle());
+                check(handle.get()!=0,"Cannot capture worker handle");
+                check(Boolean.TRUE.equals(SecretNative.invokeChecked("ProtectThread",Thread.currentThread())),"Self registration failed");
+                started.countDown();
+                while(running.get()) {ticks.incrementAndGet();java.util.concurrent.locks.LockSupport.parkNanos(1_000_000L);}
+            } catch(ThreadDeath stopped) {throw stopped;}
+            catch(Throwable error) {failure.set(error);}
+            finally {started.countDown();SecretNative.invokeChecked("UnprotectThread",Thread.currentThread());}
+        },"Secret-check-protected-worker");
+        worker.setDaemon(true);
+        System.out.println("THREAD_GUARD_STAGE pre_registration");
+        check(Boolean.TRUE.equals(SecretNative.invokeChecked("ProtectThread",worker)),"Pre-registration failed");
+        System.out.println("THREAD_GUARD_STAGE caller_probe");
+        check(probeCallerSuspend(),"Pre-registration wrongly protected the calling main OS thread");
+        System.out.println("THREAD_GUARD_STAGE worker_start");
+        worker.start();started.await();
+        System.out.println("THREAD_GUARD_STAGE self_registered");
+        long lowSuspend=0,lowTerminate=0,ordinary=0;
         try {
-            check(Thread.getAllStackTraces().containsKey(worker),"Ordinary thread was hidden");
-            worker.suspend();
-            try {
-                long parked=ticks.get();Thread.sleep(50);
-                check(ticks.get()==parked,"Ordinary suspend was blocked");
-            } finally { worker.resume(); }
-            SecretNative.invokeChecked("ProtectThread",worker);
+            check(failure.get()==null,"Self registration failed: "+failure.get());
             check(!Thread.getAllStackTraces().containsKey(worker),"Protected thread remained enumerable");
+            System.out.println("THREAD_GUARD_STAGE low_rights");
+            lowSuspend=copyHandle(handle.get(),2);lowTerminate=copyHandle(handle.get(),1);
+            check(lowSuspend!=0 && lowTerminate!=0 && threadId(lowSuspend)==0 && threadId(lowTerminate)==0,"Low-rights handle fixture still has query access");
+            for(boolean base:new boolean[]{false,true}) {
+                denied(suspendHandle(lowSuspend,base),0xffffffffL,"Protected Win32 suspend succeeded");
+                denied(terminateHandle(lowTerminate,base),0,"Protected Win32 terminate succeeded");
+            }
+            System.out.println("THREAD_GUARD_STAGE java_suspend");
             long before=ticks.get();worker.suspend();
-            try {
-                for(int i=0;i<100&&ticks.get()<=before;i++)Thread.sleep(10);
-                check(ticks.get()>before,"Protected thread was suspended");
-            } finally { worker.resume(); }
-            worker.stop();Thread.sleep(30);
-            check(worker.isAlive(),"Protected thread was stopped");
+            try {for(int n=0;n<100&&ticks.get()<=before;n++)Thread.sleep(10);check(ticks.get()>before,"Protected Java suspend succeeded");}
+            finally {worker.resume();}
+            worker.stop();Thread.sleep(30);check(worker.isAlive(),"Protected Java stop succeeded");
+            System.out.println("THREAD_GUARD_STAGE ordinary_os");
+            ordinary=ordinaryHandle();check(ordinary!=0,"Ordinary worker fixture missing");
+            check((suspendHandle(ordinary,false)&0xffffffffL)==0,"Ordinary Win32 suspend blocked");
+            check(resumeHandle(ordinary)==1,"Ordinary suspend count changed");
+            check((terminateHandle(ordinary,true)&0xffffffffL)!=0 && finishedHandle(ordinary),"Ordinary Win32 terminate blocked");
+            System.out.println("THREAD_GUARD_STAGE reference_churn");
+            Thread reader=new Thread(() -> {
+                try {for(int n=0;n<80;n++) Thread.getAllStackTraces();}
+                catch(Throwable error) {failure.set(error);}
+            },"Secret-check-reference-reader");
+            reader.start();
+            for(int n=0;n<80;n++) {SecretNative.invokeChecked("UnprotectThread",worker);SecretNative.invokeChecked("ProtectThread",worker);}
+            reader.join(3000);check(!reader.isAlive() && failure.get()==null,"Concurrent reference retirement failed: "+failure.get());
             SecretNative.invokeChecked("UnprotectThread",worker);
             check(Thread.getAllStackTraces().containsKey(worker),"Unprotected thread stayed hidden");
-            worker.stop();worker.join(2000);
-            check(!worker.isAlive(),"Ordinary stop was blocked");
+            System.out.println("THREAD_GUARD_STAGE ordinary_java");
+            worker.suspend();try {long parked=ticks.get();Thread.sleep(40);check(ticks.get()==parked,"Ordinary Java suspend blocked");}finally {worker.resume();}
+            worker.stop();worker.join(2000);check(!worker.isAlive(),"Ordinary Java stop blocked");
         } finally {
-            SecretNative.invokeChecked("UnprotectThread",worker);
-            running.set(false);worker.resume();worker.join(2000);
+            SecretNative.invokeChecked("UnprotectThread",worker);running.set(false);worker.resume();worker.join(2000);
+            closeHandle(lowSuspend);closeHandle(lowTerminate);closeHandle(handle.get());
+            if(ordinary!=0) {if(!finishedHandle(ordinary))terminateHandle(ordinary,false);closeHandle(ordinary);}
         }
-        System.out.println("THREAD_GUARD_PASS enumerate protected_suspend_stop_refused ordinary_suspend_stop_preserved");
+        System.out.println("THREAD_GUARD_PASS pre_registration_not_caller self_os_registration low_rights_kernel32_kernelbase ordinary_operations_preserved concurrent_reference_retirement");
+    }
+    private static void verifyCallbackPublication() throws Exception {
+        var method=NativeStartupCheck.class.getMethod("ownedTransform",ClassLoader.class,String.class,Class.class,java.security.ProtectionDomain.class,byte[].class);
+        var failure=new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        Thread writer=new Thread(() -> {
+            try {for(int i=0;i<20;i++) {SecretNative.invokeChecked("ClassLoadHook",NativeStartupCheck.class,method);SecretNative.invokeChecked("ClassLoadHook",null,null);}}
+            catch(Throwable error) {failure.set(error);}
+        },"Secret-check-callback-publisher");
+        writer.start();
+        for(int i=0;i<20;i++) check(SecretNative.invokeChecked("DumpClass",EarlyBootstrapService.class) instanceof byte[],"Concurrent dump failed");
+        writer.join(3000);check(!writer.isAlive()&&failure.get()==null,"Callback retirement failed: "+failure.get());
+        SecretNative.invokeChecked("ClassLoadHook",null,null);
+        System.out.println("CALLBACK_PUBLICATION_PASS concurrent_replace_capture JNI_OUTSIDE_NATIVE_LOCK");
     }
     private static void shutdownWhileEnumerating() throws Exception {
         var running=new java.util.concurrent.atomic.AtomicBoolean(true);
@@ -146,6 +229,7 @@ public final class NativeStartupCheck {
     }
     public static void main(String[] args) throws Exception {
         Path archive=Path.of(args[0]).toAbsolutePath(),directory=Path.of(args[1]).toAbsolutePath();
+        System.load(Path.of(args[2]).toAbsolutePath().toString());
         try(URLClassLoader service=new URLClassLoader(new java.net.URL[]{archive.toUri().toURL()},NativeStartupCheck.class.getClassLoader()) {
             @Override protected Class<?> loadClass(String name,boolean resolve) throws ClassNotFoundException {
                 if(!name.equals("com.himitsu.secret.bridge.SecretNative"))return super.loadClass(name,resolve);
@@ -170,8 +254,11 @@ public final class NativeStartupCheck {
                 check(published.get(null)==null,"Game bridge leaked into service copy");
                 var count=BridgeBindingCheck.class.getDeclaredField("transformed");count.setAccessible(true);
                 check(count.getInt(null)==0,"External class callback survived early isolation");
+                verifyPackageBinding(archive,Path.of(args[3]));
                 verifySourceShield(archive);
+                verifyCallbackPublication();
                 verifyThreadGuards();
+                verifyEnvironmentChain(directory);
                 System.out.println("NATIVE_STARTUP_PASS two_loaders source_shield external_agent_isolated bridge="+bridge.getName());
             } finally { shutdownWhileEnumerating(); }
         }

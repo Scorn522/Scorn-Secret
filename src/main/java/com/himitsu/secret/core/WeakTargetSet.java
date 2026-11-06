@@ -24,10 +24,18 @@ final class WeakTargetSet<T> {
         for(Node<T> n=buckets[System.identityHashCode(key)&255].head;n!=null;n=n.next) if(n.key.get()==key) return true;
         return false;
     }
-    synchronized void add(T key,Object scope) {
-        if(contains(key)) return;
+    synchronized boolean add(T key,Object scope) {
+        if(contains(key)) return false;
         Bucket<T> b=buckets[System.identityHashCode(key)&255]; b.head=new Node<>(key,scope,b.head);
         if((++writes&63)==0) compact(null,false);
+        return true;
+    }
+    synchronized void remove(T key) {
+        if(key==null) return;
+        Bucket<T> b=buckets[System.identityHashCode(key)&255];
+        List<Node<T>> live=new ArrayList<>();
+        for(Node<T> n=b.head;n!=null;n=n.next) if(n.key.get()!=null && n.key.get()!=key) live.add(n);
+        Node<T> head=null; for(int i=live.size()-1;i>=0;i--) head=new Node<>(live.get(i),head); b.head=head;
     }
     synchronized void clearScope(Object scope) { compact(scope,true); }
     synchronized void clear() { for(Bucket<T> b:buckets) b.head=null; }

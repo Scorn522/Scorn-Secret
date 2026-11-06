@@ -1,6 +1,7 @@
 """Build the standalone Windows native library; never deploy or launch Minecraft."""
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import shutil
@@ -19,6 +20,7 @@ def run(args, **kwargs):
     if result.returncode:
         print(result.stdout[-16000:], flush=True)
         result.check_returncode()
+    return result.stdout
 
 
 def tool(variable, name, fallback):
@@ -82,6 +84,9 @@ def main():
              ROOT / "native/tests/bridge_binding_test.cpp", "-o", output])
         return
     if mode == "configure":
+        package_version = os.environ.get("HIMITSU_PACKAGE_VERSION", "")
+        if not re.fullmatch(r"[A-Za-z0-9._+-]{1,96}", package_version):
+            raise RuntimeError("Set HIMITSU_PACKAGE_VERSION through the unified Gradle build")
         configure_keys()
         cmake, ninja = cmake_tools()
         run([cmake, "-S", ROOT / "native", "-B", BUILD, "-G", "Ninja",
@@ -89,7 +94,8 @@ def main():
              "-DCMAKE_C_COMPILER_ARG1=cc", f"-DCMAKE_CXX_COMPILER={zig}",
              "-DCMAKE_CXX_COMPILER_ARG1=c++", "-DCMAKE_C_FLAGS=-target x86_64-windows-gnu",
              "-DCMAKE_CXX_FLAGS=-target x86_64-windows-gnu", "-DCMAKE_BUILD_TYPE=Release",
-             "-DHIMITSU_LLVM_OBFUSCATION=OFF", "-DHIMITSU_LOCAL_TEST=ON"])
+             "-DHIMITSU_LLVM_OBFUSCATION=OFF", "-DHIMITSU_LOCAL_TEST=ON",
+             f"-DHIMITSU_PACKAGE_VERSION={package_version}"])
     else:
         output = ROOT / "build/local-shutdown-test.exe"
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -98,7 +104,8 @@ def main():
              "-I", ROOT / "native/include", "-I", java / "include",
              "-I", java / "include/win32", ROOT / "native/tests/local_shutdown_test.cpp",
              ROOT / "native/src/core/runtime_state.cpp", "-o", output])
-        run([output], timeout=15)
+        for scenario in ("normal", "timeout", "reader-timeout"):
+            print(run([output, scenario], timeout=15), end="", flush=True)
 
 
 if __name__ == "__main__":

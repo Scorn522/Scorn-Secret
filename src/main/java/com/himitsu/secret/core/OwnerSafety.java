@@ -11,20 +11,42 @@ import net.minecraft.world.level.Level;
 /** Identity snapshots are published only at registration/lifecycle boundaries. */
 public final class OwnerSafety {
     private static volatile Map<Player,Binding> owners=new IdentityHashMap<>();
+    private static volatile Map<AttributeMap,Binding> attributeOwners=new IdentityHashMap<>();
+    private static final Map<Player,Binding> pendingOwners=new IdentityHashMap<>();
     private static final Map<AttributeInstance,Binding> ATTRIBUTES=new ConcurrentHashMap<>();
     private static final ThreadLocal<ArrayDeque<Access>> ACCESS=new ThreadLocal<>();
     private record Access(Player player,int kind,boolean owner,Binding previous) {}
     private static final class Binding {
         final Player player; final Level level; final Object session; final net.minecraft.network.Connection connection;
-        final AttributeMap attributes;
+        AttributeMap attributes;
         volatile boolean active=true, owner;
         ItemStack weapon=ItemStack.EMPTY; int weaponSlot=-1, nextCheck;
+        double x,y,z,dx,dy,dz; boolean positionKnown,motionKnown;
         Binding(Player player,Object session,Binding previous) {
             this.player=player; this.level=player.level(); this.session=session; attributes=player.getAttributes();
             connection=session instanceof net.minecraft.server.network.ServerGamePacketListenerImpl server
                 ? server.connection : ((net.minecraft.client.multiplayer.ClientPacketListener)session).getConnection();
             if(previous!=null) { weapon=previous.weapon; weaponSlot=previous.weaponSlot; }
             nextCheck=player.tickCount+20;
+            motion();
+        }
+        void motion() {
+            // Store scalar values, not aliases to a Vec3 that may itself be overwritten.
+            var position=player.position();
+            if(finite(position)) {x=position.x;y=position.y;z=position.z;positionKnown=true;}
+            else if(positionKnown) {
+                if(position==null) {
+                    player.position=new net.minecraft.world.phys.Vec3(x,y,z);
+                    player.blockPosition=net.minecraft.core.BlockPos.containing(x,y,z);
+                    player.chunkPosition=new net.minecraft.world.level.ChunkPos(player.blockPosition);
+                    player.feetBlockState=null;
+                    player.levelCallback.onMove();
+                }
+                player.setPos(x,y,z);
+            }
+            var velocity=player.getDeltaMovement();
+            if(finite(velocity)) {dx=velocity.x;dy=velocity.y;dz=velocity.z;motionKnown=true;}
+            else player.setDeltaMovement(motionKnown?new net.minecraft.world.phys.Vec3(dx,dy,dz):net.minecraft.world.phys.Vec3.ZERO);
         }
         void weapon(boolean legitimate) {
             nextCheck=player.tickCount+20;
@@ -46,6 +68,9 @@ public final class OwnerSafety {
         }
     }
     private OwnerSafety() {}
+    private static boolean finite(net.minecraft.world.phys.Vec3 value) {
+        return value!=null && Double.isFinite(value.x) && Double.isFinite(value.y) && Double.isFinite(value.z);
+    }
     private static boolean blade(ItemStack stack) { return stack!=null && !stack.isEmpty() && stack.getItem() instanceof com.himitsu.secret.item.CivilizationSurvivalItem; }
     private static Object session(Player player) {
         if(player==null || player instanceof net.minecraftforge.common.util.FakePlayer || player.level()==null) return null;
@@ -71,15 +96,24 @@ public final class OwnerSafety {
     private static synchronized boolean registerSession(Player player,Binding previous) {
         Binding current=owners.get(player);
         if(current!=null) return current.active && current.level==player.level();
-        if(player==null || inLifecycle(player)) return false;
+        if(player==null || !AuthoritativeEntityTopology.open(player.level()) || inLifecycle(player)) return false;
         Object session=session(player); if(session==null) return false;
+        if(previous==null) previous=pendingOwners.remove(player);
         var next=new IdentityHashMap<>(owners); next.put(player,new Binding(player,session,previous)); owners=next; return true;
     }
     static synchronized void bind(Player player) {
         if(player==null || DeathExecution.isMarked(player) || !registerSession(player)) return;
         Binding b=owners.get(player); if(b.owner) return;
         for(AttributeInstance attribute:b.attributes.attributes.values()) ATTRIBUTES.put(attribute,b);
+        var attributes=new IdentityHashMap<>(attributeOwners); attributes.put(b.attributes,b); attributeOwners=attributes;
         b.owner=true; b.weapon(false);
+    }
+    public static synchronized void onPlayerClone(Player original,Player replacement) {
+        if(!DeathExecution.sameSession(original,replacement)) return;
+        Binding prior=owners.get(original);
+        var stack=ACCESS.get();
+        if(stack!=null) for(Access frame:stack) if(frame.player()==original && frame.kind()==2 && frame.owner()) { prior=frame.previous(); break; }
+        if(prior!=null && prior.owner) pendingOwners.put(replacement,prior);
     }
     static void pruneClient(Level level) {
         if(level instanceof net.minecraft.client.multiplayer.ClientLevel client)
@@ -87,20 +121,28 @@ public final class OwnerSafety {
     }
     public static void revoke(Player player) { Binding b=owners.get(player); if(b!=null) b.owner=false; }
     public static void connectionClosed(net.minecraft.network.Connection connection) {
+        DeathExecution.connectionClosed(connection);
         for(Binding b:owners.values()) if(b.connection==connection) b.active=false;
     }
     static synchronized void release(Player player) {
+        pendingOwners.remove(player);
         Binding b=owners.get(player); if(b==null) return;
         b.active=false;
         var next=new IdentityHashMap<>(owners); next.remove(player); owners=next;
+        var attributes=new IdentityHashMap<>(attributeOwners); attributes.remove(b.attributes); attributeOwners=attributes;
         ATTRIBUTES.entrySet().removeIf(e->e.getValue()==b);
     }
     static synchronized void clearLevel(Level level) {
         for(Binding b:owners.values()) if(b.level==level) release(b.player);
+        pendingOwners.keySet().removeIf(p->p.level()==level);
     }
     static void maintainWeapon(Player player) {
         Binding b=owners.get(player);
-        if(b!=null && b.active && b.owner && player.tickCount-b.nextCheck>=0) b.weapon(false);
+        if(b!=null && b.active && b.owner) {
+            b.motion();
+            if(b.attributes!=player.getAttributes()) refreshAttributes(b);
+            if(player.tickCount-b.nextCheck>=0) b.weapon(false);
+        }
     }
     static void weaponChanged(Player player) { Binding b=owners.get(player); if(b!=null) b.nextCheck=player.tickCount; }
     public static void access(Player player,int kind,boolean enter) {
@@ -139,9 +181,17 @@ public final class OwnerSafety {
         if(stack!=null) for(Access a:stack) if(a.player()==player && a.kind()==2 && a.owner()) return session(player)!=null;
         return false;
     }
+    private static synchronized void refreshAttributes(Binding binding) {
+        AttributeMap current=binding.player.getAttributes(); if(current==binding.attributes) return;
+        var next=new IdentityHashMap<>(attributeOwners); next.remove(binding.attributes);
+        ATTRIBUTES.entrySet().removeIf(e->e.getValue()==binding);
+        binding.attributes=current; next.put(current,binding); attributeOwners=next;
+        for(AttributeInstance a:current.attributes.values()) ATTRIBUTES.put(a,binding);
+    }
     public static void attribute(AttributeMap map,AttributeInstance value) {
-        if(value==null || ATTRIBUTES.containsKey(value)) return;
-        for(Binding b:owners.values()) if(b.active && b.owner && b.attributes==map) { ATTRIBUTES.putIfAbsent(value,b); return; }
+        Binding b=attributeOwners.get(map);
+        if(b==null || !b.active || !b.owner || value==null) return;
+        if(!ATTRIBUTES.containsKey(value)) ATTRIBUTES.putIfAbsent(value,b);
     }
     static boolean baseDenied(AttributeInstance instance,double value) {
         Binding b=ATTRIBUTES.get(instance); if(b==null || !owns(b.player) || allowed(b.player,1)) return false;

@@ -5,7 +5,7 @@ plugins {
     id 'net.minecraftforge.gradle' version '[6.0,6.2)'
 }
 
-version = '4.3-local-test-r15'
+version = '4.3-local-test-r18'
 group = 'com.himitsu.secret'
 
 base {
@@ -78,9 +78,11 @@ tasks.register('configureNative', Exec) {
     dependsOn tasks.named('compileJava')
     inputs.file 'native/CMakeLists.txt'
     inputs.file 'tools/build_native.py'
+    inputs.property('packageVersion', project.version)
     outputs.files(localNativeBuild.map { it.file('CMakeCache.txt') }, localKeys, localKeyHeader)
     doFirst {
         environment 'JAVA_HOME', tasks.named('compileJava').get().javaCompiler.get().metadata.installationPath.asFile.absolutePath
+        environment 'HIMITSU_PACKAGE_VERSION', project.version.toString()
         commandLine pythonCommand.get(), file('tools/build_native.py').absolutePath, 'configure'
     }
 }
@@ -276,7 +278,8 @@ tasks.register('secureJar', JavaExec) {
             finalJar.get().asFile.absolutePath,
             nekoMapping.get().asFile.absolutePath,
             secrets.outer,
-            secrets.class
+            secrets.class,
+            project.version.toString()
         ])
     }
     inputs.file nekoOutputJar
@@ -313,7 +316,8 @@ tasks.register('secureJarEncryptionOnly', JavaExec) {
             encryptionOnlyJar.get().asFile.absolutePath,
             encryptionOnlyMapping.get().asFile.absolutePath,
             secrets.outer,
-            secrets.class
+            secrets.class,
+            project.version.toString()
         ])
     }
     inputs.file tasks.named('jar').flatMap { it.archiveFile }
@@ -358,7 +362,33 @@ tasks.register('buildAuthServerDistribution', Exec) {
 }
 
 
+// Service and game layers share an archive, but only the game module exports game packages.
+tasks.register('serviceModuleDescriptor') {
+    inputs.property('version', project.version)
+    outputs.file layout.buildDirectory.file('service-module/module-info.class')
+    doLast {
+        def asmJar = configurations.runtimeClasspath.files.find { it.name ==~ /asm-[0-9].*\.jar/ }
+        if (asmJar == null) throw new GradleException('Forge ASM dependency unavailable')
+        def loader = new URLClassLoader([asmJar.toURI().toURL()] as URL[], ClassLoader.getPlatformClassLoader())
+        def writer = loader.loadClass('org.objectweb.asm.ClassWriter').getConstructor(Integer.TYPE).newInstance(0)
+        writer.visit(61, 0x8000, 'module-info', null, null, null)
+        def descriptor = writer.visitModule('secret.bootstrap', 0x0020, project.version.toString())
+        descriptor.visitRequire('java.base', 0x8000, null)
+        ['cpw.mods.modlauncher', 'fmlloader', 'net.minecraftforge.forgespi'].each { descriptor.visitRequire(it, 0, null) }
+        descriptor.visitRequire('org.lwjgl', 0x0040, null)
+        ['com/himitsu/secret', 'com/himitsu/secret/bridge', 'com/himitsu/secret/code'].each { descriptor.visitPackage(it) }
+        ['cpw/mods/modlauncher/api/ITransformationService', 'net/minecraftforge/forgespi/locating/IModLocator'].each {
+            descriptor.visitProvide(it, ['com/himitsu/secret/bridge/EarlyBootstrapService'] as String[])
+        }
+        descriptor.visitEnd(); writer.visitEnd()
+        def target = layout.buildDirectory.file('service-module/module-info.class').get().asFile
+        target.parentFile.mkdirs(); target.bytes = writer.toByteArray(); loader.close()
+    }
+}
+
 jar {
+    dependsOn tasks.named('serviceModuleDescriptor')
+    from(layout.buildDirectory.dir('service-module')) { include 'module-info.class' }
     destinationDirectory = layout.buildDirectory.dir('intermediate')
     manifest {
         attributes([
@@ -443,7 +473,7 @@ tasks.register('checkNativeBootstrap', JavaExec) {
     dependsOn tasks.named('checksClasses'), tasks.named('localJar')
     classpath = sourceSets.checks.runtimeClasspath
     mainClass = 'com.himitsu.secret.bridge.NativeBootstrapCheck'
-    jvmArgs '-Xverify:all'
+    jvmArgs '-Xverify:all', '--add-opens=java.base/java.lang.invoke=ALL-UNNAMED'
     args finalJar.get().asFile.absolutePath
 }
 tasks.named('check').configure { dependsOn tasks.named('checkNativeBootstrap') }
@@ -478,10 +508,10 @@ tasks.named('check').configure { dependsOn tasks.named('checkBridgeBinding') }
 // Kept separate from ordinary model checks because it changes this check JVM's agents.
 tasks.register('checkNativeStartup', JavaExec) {
     timeout = java.time.Duration.ofSeconds(45)
-    dependsOn tasks.named('bridgeCheckAgent'), tasks.named('localJar')
-    classpath = files(finalJar) + sourceSets.checks.output + configurations.runtimeClasspath
+    dependsOn tasks.named('bridgeCheckAgent'), tasks.named('localJar'), tasks.named('compileBridgeBindingCheck')
+    classpath = files(finalJar, secureToolOutput) + sourceSets.checks.output + configurations.runtimeClasspath
     mainClass = 'com.himitsu.secret.bridge.NativeStartupCheck'
     jvmArgs '-Xverify:all', "-javaagent:${layout.buildDirectory.file('checks/bridge-check-agent.jar').get().asFile.absolutePath}"
-    args finalJar.get().asFile.absolutePath, layout.projectDirectory.dir('.work/r7-native-startup').asFile.absolutePath
+    args finalJar.get().asFile.absolutePath, layout.projectDirectory.dir('.work/r7-native-startup').asFile.absolutePath, layout.buildDirectory.file('bridge-binding-check.dll').get().asFile.absolutePath, localKeys.get().asFile.absolutePath
     if (providers.gradleProperty('smokeJava').isPresent()) executable = providers.gradleProperty('smokeJava').get()
 }

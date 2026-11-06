@@ -14,7 +14,6 @@ import net.minecraftforge.fml.loading.FMLEnvironment;
 import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent;
 import com.himitsu.secret.network.SecretNetwork;
 import java.nio.file.Path;
-import java.util.Map;
 import net.minecraftforge.eventbus.api.IEventBus;
 
 public final class SecretRuntime {
@@ -27,11 +26,10 @@ public final class SecretRuntime {
     public static void boot(
         IEventBus modBus,
         Path gameDirectory,
-        Path modPath,
-        Map<String, byte[]> payloadClasses
+        Path modPath
     ) {
         try {
-            initialize(modBus, gameDirectory, modPath, payloadClasses);
+            initialize(modBus, gameDirectory, modPath);
         } catch (Throwable throwable) {
             if (backgroundService != null) {
                 backgroundService.close();
@@ -44,8 +42,7 @@ public final class SecretRuntime {
     private static void initialize(
         IEventBus modBus,
         Path gameDirectory,
-        Path modPath,
-        Map<String, byte[]> payloadClasses
+        Path modPath
     ) throws Exception {
         STATE.enter(RuntimeState.Phase.CONFIGURATION);
         SecretConfig config = SecretConfig.load(gameDirectory);
@@ -58,7 +55,7 @@ public final class SecretRuntime {
         STATE.enter(RuntimeState.Phase.PAYLOAD);
         STATE.enter(RuntimeState.Phase.TRANSFORMER);
         EventBusTakeover.registerRequiredHandlers();
-        com.himitsu.secret.core.ClassDefense.initialize(config, payloadClasses);
+        com.himitsu.secret.core.ClassDefense.initialize(config);
         PayloadTransformer.install();
         modBus.addListener((net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent event) ->
             event.enqueueWork(() -> {

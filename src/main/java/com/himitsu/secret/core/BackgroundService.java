@@ -23,12 +23,13 @@ public final class BackgroundService implements AutoCloseable {
     private Thread startProtected(String name, Runnable loop) {
         Thread thread = new Thread(loop, name);
         thread.setDaemon(true);
-        SecretThreadProtection.protect(thread);
+        if(!SecretThreadProtection.protect(thread)) {running.set(false);throw new IllegalStateException("Maintenance thread pre-registration failed");}
         thread.start();
         return thread;
     }
 
     private void commonLoop() {
+        if(!SecretThreadProtection.protect(Thread.currentThread())) {running.set(false);return;}
         while (running.get()) {
             try {
                 RuntimeMetrics.recordTransformedCycle();
@@ -44,14 +45,16 @@ public final class BackgroundService implements AutoCloseable {
 
     @Override
     public void close() {
-        if (!running.getAndSet(false)) return;
-        SecretThreadProtection.unprotect(commonThread);
+        running.set(false);
         interrupt(commonThread);
         if (commonThread != null && commonThread != Thread.currentThread()) {
             try { commonThread.join(1000L); }
             catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
         }
-        state.enter(RuntimeState.Phase.STOPPED);
+        if(commonThread==null || !commonThread.isAlive()) {
+            if(commonThread!=null) SecretThreadProtection.unprotect(commonThread);
+            state.enter(RuntimeState.Phase.STOPPED);
+        } else System.err.println("[Secret/ThreadGuard] Maintenance thread not drained; protection retained for native shutdown");
     }
 
     private static void interrupt(Thread thread) {

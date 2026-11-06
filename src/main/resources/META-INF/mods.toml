@@ -3,7 +3,7 @@ loaderVersion="[47,)"
 license="MIT"
 [[mods]]
 modId="secret"
-version="4.3-local-test-r15"
+version="${file.jarVersion}"
 displayName="Secret (Local Test)"
 authors="himitsu"
 credits="Target-scoped local development by Scorn"

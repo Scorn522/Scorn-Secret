@@ -48,7 +48,8 @@ public final class SecretEntityHooks {
             net.minecraftforge.eventbus.EventBus.class, ServerLevel.class, PersistentEntitySectionManager.class,
             net.minecraft.world.inventory.AbstractContainerMenu.class, net.minecraft.world.entity.player.Inventory.class,
             net.minecraft.server.network.ServerGamePacketListenerImpl.class, net.minecraft.server.players.PlayerList.class,
-            net.minecraft.server.level.ServerPlayer.class, net.minecraft.network.Connection.class, EntityTickList.class});
+            net.minecraft.server.level.ServerPlayer.class, net.minecraft.network.Connection.class, EntityTickList.class,
+            Entity.class, net.minecraft.world.entity.ai.attributes.AttributeInstance.class, net.minecraft.world.entity.ai.attributes.AttributeMap.class});
         if(net.minecraftforge.fml.loading.FMLEnvironment.dist==net.minecraftforge.api.distmarker.Dist.CLIENT)
             result=Boolean.TRUE.equals(result) && Boolean.TRUE.equals(com.himitsu.secret.bridge.SecretNative.invokeChecked("RetransformClass",ClientLevel.class));
         if(!Boolean.TRUE.equals(result)) throw new IllegalStateException("Target/Owner hook installation failed");
@@ -57,7 +58,11 @@ public final class SecretEntityHooks {
                 || missing.contains("SecretEntityHooks.guardWorldEntry") || missing.contains("SecretEntityHooks.guardManagerEntry")
                 || missing.contains("OwnerSafetyHooks.clicked") || missing.contains("OwnerSafetyHooks.pickup")
                 || missing.contains("OwnerSafetyHooks.load") || missing.contains("OwnerSafetyHooks.creative")
-                || missing.contains("OwnerSafetyHooks.logout") || missing.contains("OwnerSafetyHooks.dimension") || missing.contains("OwnerSafetyHooks.disconnected"))
+                || missing.contains("OwnerSafetyHooks.logout") || missing.contains("OwnerSafetyHooks.dimension") || missing.contains("OwnerSafetyHooks.disconnected")
+                || missing.contains("OwnerSafetyHooks.removal") || missing.contains("OwnerSafetyHooks.kill")
+                || missing.contains("OwnerSafetyHooks.health") || missing.contains("OwnerSafetyHooks.heal")
+                || missing.contains("OwnerSafetyHooks.revive") || missing.contains("OwnerSafetyHooks.respawn")
+                || missing.contains("OwnerSafetyHooks.base") || missing.contains("OwnerSafetyHooks.modifier") || missing.contains("OwnerSafetyHooks.attribute"))
                 throw new IllegalStateException("Required control hook was not applied: "+missing);
         }
     }
@@ -82,11 +87,14 @@ public final class SecretEntityHooks {
         return true;
     }
     @AsmHook(targetClass="net/minecraft/server/level/ServerLevel", targetMethod="addEntity", targetAliases="m_8872_", targetDescriptor="(Lnet/minecraft/world/entity/Entity;)Z", mode=HookMode.GUARD, includeThis=true)
-    public static boolean guardWorldEntry(ServerLevel level,Entity entity) { return blockedEntry(level,entity); }
+    public static boolean guardWorldEntry(ServerLevel level,Entity entity) { boolean blocked=blockedEntry(level,entity); if(blocked) TargetCleanup.requestRetry(entity); return blocked; }
     @AsmHook(targetClass="net/minecraft/world/level/entity/PersistentEntitySectionManager", targetMethod="addEntity", targetAliases="m_157538_", targetDescriptor="(Lnet/minecraft/world/level/entity/EntityAccess;Z)Z", mode=HookMode.GUARD, includeThis=true)
     @AsmHook(targetClass="net/minecraft/world/level/entity/PersistentEntitySectionManager", targetMethod="addEntityWithoutEvent", targetDescriptor="(Lnet/minecraft/world/level/entity/EntityAccess;Z)Z", mode=HookMode.GUARD, includeThis=true)
     public static boolean guardManagerEntry(PersistentEntitySectionManager<?> manager,EntityAccess access,boolean loaded) {
-        return access instanceof Entity entity && blockedEntry(ENTITY_MANAGER_LEVELS.getOrDefault(manager,entity.level()),entity);
+        if(!(access instanceof Entity entity)) return false;
+        boolean blocked=blockedEntry(ENTITY_MANAGER_LEVELS.getOrDefault(manager,entity.level()),entity);
+        if(blocked) TargetCleanup.requestRetry(entity);
+        return blocked;
     }
 
     @AsmHook(

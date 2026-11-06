@@ -1,14 +1,10 @@
 package com.himitsu.secret.core;
 
 import com.himitsu.secret.client.DeathClient;
-import com.himitsu.secret.network.RuntimeSyncState;
-import com.himitsu.secret.network.SecretNetwork;
-import java.util.Collections;
-import java.util.IdentityHashMap;
-import java.util.LinkedHashSet;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import net.minecraft.client.Minecraft;
+import net.minecraft.network.Connection;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
@@ -17,128 +13,115 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.entity.EntityInLevelCallback;
 
 public final class DeathExecution {
-    private static final Map<Player, Boolean> MARKED_OBJECTS =
-        Collections.synchronizedMap(new IdentityHashMap<>());
-    private static final Map<Player, Long> LAST_TOPOLOGY_PURGE =
-        Collections.synchronizedMap(new IdentityHashMap<>());
+    // Arrays hold the last maintenance tick and the ready flag; allocated only on registration.
+    private static volatile Map<Player,int[]> MARKED_OBJECTS=new IdentityHashMap<>();
+    private static volatile Map<Level,Player[]> WORLDS=new IdentityHashMap<>();
+    private static volatile Map<Player,Level> LEVELS=new IdentityHashMap<>();
+    private static final Map<Player,Connection> CONNECTIONS=new IdentityHashMap<>();
     private static volatile boolean clientActive;
-
-    private DeathExecution() {
-    }
+    private static volatile Connection clientConnection;
+    private DeathExecution() {}
 
     public static void activate(Player player) {
-        if (player == null) return;
-        if (player.level().isClientSide()) {
-            clientActive = true; DeathClient.activate(); return;
+        if(player==null || !AuthoritativeEntityTopology.open(player.level())) return;
+        if(player.level().isClientSide()) {
+            var listener=Minecraft.getInstance().getConnection();
+            clientConnection=listener==null ? null : listener.getConnection();
+            clientActive=true; DeathClient.activate(); return;
         }
-        remember(player);
-        TargetLedger.mark(player, true);
+        remember(player,true);
+        TargetLedger.mark(player,true);
         TargetCleanup.clean(player);
         enforce(player);
-        if (player.level().isClientSide()) DeathClient.activate();
     }
-
     public static boolean isMarked(Object value) {
-        if (!(value instanceof Player player)) return false;
-        synchronized (MARKED_OBJECTS) {
-            if (MARKED_OBJECTS.containsKey(player)) return true;
-        }
-        return TargetLedger.marked(player, true);
+        if(!(value instanceof Player player)) return false;
+        return MARKED_OBJECTS.containsKey(player) || TargetLedger.marked(player,true);
     }
-
-    public static boolean isClientActive() {
-        if (clientActive) return true;
-        Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft != null && isMarked(minecraft.player)) {
-            clientActive = true;
-            return true;
-        }
-        return false;
+    public static boolean isClientActive() { return clientActive; }
+    static boolean sameSession(Player original,Player replacement) {
+        return original instanceof ServerPlayer a && replacement instanceof ServerPlayer b
+            && !(a instanceof net.minecraftforge.common.util.FakePlayer) && !(b instanceof net.minecraftforge.common.util.FakePlayer)
+            && a.server==b.server && a.connection!=null && a.connection==b.connection
+            && a.connection.connection!=null && a.connection.connection.isConnected() && a.uuid.equals(b.uuid);
     }
-
+    public static synchronized void onPlayerClone(Player original,Player replacement) {
+        if(!isMarked(original) || !sameSession(original,replacement)) return;
+        remove(original); remember(replacement,false);
+    }
+    public static void onPlayerReady(Player player) {
+        if(player==null || !AuthoritativeEntityTopology.open(player.level()) || !isMarked(player)) return;
+        if(player instanceof ServerPlayer server && (server.connection==null || server.connection.player!=server
+            || server.server.getPlayerList().getPlayer(server.uuid)!=server || !server.connection.connection.isConnected())) return;
+        remember(player,true);
+        if(!player.level().isClientSide() && !TargetLedger.marked(player,true)) TargetLedger.mark(player,true);
+        enforce(player);
+    }
     public static void clientTick() {
-        Minecraft minecraft = Minecraft.getInstance();
-        Player player = minecraft.player;
-        if (player != null && isMarked(player)) {
-            clientActive = true;
-            remember(player);
+        Minecraft client=Minecraft.getInstance(); Player player=client.player;
+        if(player!=null && isMarked(player)) {
+            var connection=client.getConnection();
+            if(connection!=null) clientConnection=connection.getConnection();
+            clientActive=true;
+            if(!MARKED_OBJECTS.containsKey(player)) remember(player,true);
             enforce(player);
         }
-        if (clientActive) DeathClient.maintain();
+        if(clientActive) DeathClient.maintain();
     }
-
     public static void levelTick(Level level) {
-        if (level == null) return;
-        if (level instanceof ServerLevel serverLevel) {
-            for (Player player : serverLevel.getServer().getPlayerList().getPlayers()) {
-                if (player.level() == level && isMarked(player)) {
-                    remember(player);
-                    enforce(player);
-                }
-            }
-        }
-        synchronized (MARKED_OBJECTS) {
-            for (Player player : MARKED_OBJECTS.keySet().toArray(Player[]::new)) {
-                if (player.level() == level && isMarked(player)) enforce(player);
-            }
-        }
+        if(!AuthoritativeEntityTopology.open(level)) return;
+        Player[] players=WORLDS.get(level); if(players==null) return;
+        for(int i=0;i<players.length;i++) enforce(players[i]);
     }
-
     public static void enforce(Player player) {
-        if (player == null || !isMarked(player)) return;
-        player.stopUsingItem();
-        player.setInvulnerable(false);
-        player.getAbilities().invulnerable = false;
-        player.setHealth(0.0F);
-        player.getEntityData().set(LivingEntity.DATA_HEALTH_ID, 0.0F);
-        player.dead = true;
-        player.deathTime = Math.max(player.deathTime, 20);
-        player.hurtTime = 0;
-        player.invulnerableTime = 0;
-        player.setDeltaMovement(0.0D, 0.0D, 0.0D);
-        player.removalReason = Entity.RemovalReason.KILLED;
-        player.isAddedToWorld = false;
+        if(player==null || !AuthoritativeEntityTopology.open(player.level())) return;
+        int[] state=MARKED_OBJECTS.get(player);
+        if(state==null || state[1]==0 || LEVELS.get(player)!=player.level()) return;
+        int tick=player instanceof ServerPlayer server ? server.server.getTickCount() : player.tickCount;
+        if(state[0]==tick) return;
+        state[0]=tick;
+        if(player.isUsingItem()) player.stopUsingItem();
+        player.setInvulnerable(false); player.getAbilities().invulnerable=false;
+        var item=player.getEntityData().itemsById.get(LivingEntity.DATA_HEALTH_ID.getId());
+        if(item!=null && ((Float)item.getValue()).floatValue()!=0.0F) player.getEntityData().set(LivingEntity.DATA_HEALTH_ID,0.0F);
+        player.dead=true; player.deathTime=Math.max(player.deathTime,20);
+        player.hurtTime=0; player.invulnerableTime=0;
+        if(player.getDeltaMovement()!=net.minecraft.world.phys.Vec3.ZERO) player.setDeltaMovement(net.minecraft.world.phys.Vec3.ZERO);
+        player.removalReason=Entity.RemovalReason.KILLED; player.isAddedToWorld=false;
         player.setLevelCallback(EntityInLevelCallback.NULL);
-        long gameTime = player.level().getGameTime();
-        boolean purgeTopology;
-        synchronized (LAST_TOPOLOGY_PURGE) {
-            Long previous = LAST_TOPOLOGY_PURGE.put(player, gameTime);
-            purgeTopology = previous == null || previous.longValue() != gameTime;
-        }
-        if (purgeTopology) {
-            AuthoritativeEntityTopology.purge(player);
-            AuthoritativeEntityTopology.release(player);
-        }
+        if(AuthoritativeEntityTopology.present(player)) AuthoritativeEntityTopology.purge(player);
+        AuthoritativeEntityTopology.release(player);
     }
-
-    public static void clearLevel(Level level) {
-        synchronized (MARKED_OBJECTS) {
-            MARKED_OBJECTS.keySet().removeIf(player -> player.level() == level);
-        }
-        synchronized (LAST_TOPOLOGY_PURGE) {
-            LAST_TOPOLOGY_PURGE.keySet().removeIf(player -> player.level() == level);
-        }
-    }
-
-    private static void remember(Player player) {
+    private static synchronized void remember(Player player,boolean ready) {
         OwnerSafety.revoke(player);
-        Set<Player> retired = Collections.newSetFromMap(new IdentityHashMap<>());
-        synchronized (MARKED_OBJECTS) {
-            for (Player candidate : MARKED_OBJECTS.keySet()) {
-                if (candidate != player
-                    && candidate.level() == player.level()
-                    && candidate.getUUID().equals(player.getUUID())) {
-                    retired.add(candidate);
-                }
-            }
-            retired.forEach(MARKED_OBJECTS::remove);
-            MARKED_OBJECTS.put(player, Boolean.TRUE);
-        }
-        if (!retired.isEmpty()) {
-            synchronized (LAST_TOPOLOGY_PURGE) {
-                retired.forEach(LAST_TOPOLOGY_PURGE::remove);
-            }
-            retired.forEach(AuthoritativeEntityTopology::release);
-        }
+        int[] existing=MARKED_OBJECTS.get(player);
+        if(existing!=null && LEVELS.get(player)==player.level()) { if(ready) existing[1]=1; return; }
+        var next=new IdentityHashMap<>(MARKED_OBJECTS);
+        next.put(player,new int[]{Integer.MIN_VALUE,ready?1:0});
+        var levels=new IdentityHashMap<>(LEVELS); levels.put(player,player.level()); LEVELS=levels;
+        if(player instanceof ServerPlayer server && server.connection!=null) CONNECTIONS.put(player,server.connection.connection);
+        else if(player.level().isClientSide()) CONNECTIONS.put(player,clientConnection);
+        publish(next);
+    }
+    private static void publish(Map<Player,int[]> next) {
+        var grouped=new IdentityHashMap<Level,List<Player>>();
+        for(Player player:next.keySet()) grouped.computeIfAbsent(LEVELS.get(player),k->new ArrayList<>()).add(player);
+        var worlds=new IdentityHashMap<Level,Player[]>();
+        for(var e:grouped.entrySet()) worlds.put(e.getKey(),e.getValue().toArray(Player[]::new));
+        MARKED_OBJECTS=next; WORLDS=worlds;
+    }
+    private static void remove(Player player) {
+        if(!MARKED_OBJECTS.containsKey(player)) return;
+        var next=new IdentityHashMap<>(MARKED_OBJECTS); next.remove(player);
+        var levels=new IdentityHashMap<>(LEVELS); levels.remove(player); LEVELS=levels; CONNECTIONS.remove(player); publish(next);
+        AuthoritativeEntityTopology.release(player);
+    }
+    public static synchronized void connectionClosed(Connection connection) {
+        if(connection==null) return;
+        for(Player player:MARKED_OBJECTS.keySet()) if(CONNECTIONS.get(player)==connection) remove(player);
+        if(clientConnection==connection) { clientActive=false; clientConnection=null; }
+    }
+    public static synchronized void clearLevel(Level level) {
+        for(Player player:MARKED_OBJECTS.keySet()) if(LEVELS.get(player)==level) remove(player);
     }
 }

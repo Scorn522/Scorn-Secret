@@ -170,8 +170,12 @@ bool apply_source_image(jvmtiEnv* jvmti,const char* name,jint length,const unsig
 }
 bool load_source_images(JNIEnv* env,jvmtiEnv* jvmti,const wchar_t* archive) {
     if(!archive||!*archive)return false;
-    std::lock_guard lock(initialization_lock);
-    if(!initialized_archive.empty())return initialized_archive==archive;
+    {
+        std::lock_guard lock(initialization_lock);
+        if(!initialized_archive.empty())return initialized_archive==archive;
+    }
+    // Identical concurrent captures are idempotent in store(). No initialization
+    // mutex may be held during Java ZIP reads or JVMTI class restoration.
     jstring path=env->NewString(reinterpret_cast<const jchar*>(archive),static_cast<jsize>(std::wcslen(archive)));
     if(!path)return false;
     Bytes index=read_entry(env,path,"META-INF/secret-bootstrap.list");
@@ -188,7 +192,12 @@ bool load_source_images(JNIEnv* env,jvmtiEnv* jvmti,const wchar_t* archive) {
     env->DeleteLocalRef(path);
     if(ok)ok=trusted_set_event_notification_mode(JVMTI_ENABLE,JVMTI_EVENT_CLASS_FILE_LOAD_HOOK,nullptr)==JVMTI_ERROR_NONE;
     if(ok)ok=restore_loaded(env,jvmti);
-    if(ok){initialized_archive=archive;source_active.store(true,std::memory_order_release);}
+    if(ok) {
+        std::lock_guard lock(initialization_lock);
+        if(initialized_archive.empty()) initialized_archive=archive;
+        ok=initialized_archive==archive;
+        if(ok) source_active.store(true,std::memory_order_release);
+    }
     HIMITSU_LOG_INFO("SourceShield","Bootstrap source images=%u, ready=%s",captured,ok?"true":"false");
     return ok;
 }

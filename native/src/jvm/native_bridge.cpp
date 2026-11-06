@@ -12,6 +12,8 @@
 #include "himitsu/jvm/source_images.hpp"
 
 #include <cstring>
+#include <exception>
+#include <new>
 
 namespace {
 constexpr const char* bootstrap_signature = "Lcom/himitsu/secret/bridge/SecretNative;";
@@ -29,7 +31,9 @@ jobject JNICALL invoke_native(JNIEnv* env, jclass, jstring command, jobjectArray
         invoke_seen=true;
         return arguments!=nullptr && env->GetArrayLength(arguments)==1 ? env->GetObjectArrayElement(arguments,0) : nullptr;
     }
-    return himitsu::core::dispatch_command(env, command, arguments);
+    try {return himitsu::core::dispatch_command(env,command,arguments);}
+    catch(const std::bad_alloc&) {return himitsu::jvm::new_exception(env,"java/lang/OutOfMemoryError","Secret native allocation failed");}
+    catch(const std::exception& error) {return himitsu::jvm::new_exception(env,"java/lang/IllegalStateException",error.what());}
 }
 
 jboolean JNICALL ready_native(JNIEnv*, jclass) {

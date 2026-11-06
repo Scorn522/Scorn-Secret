@@ -48,6 +48,7 @@ public final class NativeBootstrapCheck {
     }
 
     private static final class Isolated extends ClassLoader {
+        private java.security.ProtectionDomain source;
         private final String target;
         private final byte[] bytes;
         private final Map<String, byte[]> resources;
@@ -61,7 +62,7 @@ public final class NativeBootstrapCheck {
                 throws ClassNotFoundException {
             if (!name.equals(target)) return super.loadClass(name, resolve);
             Class<?> type = findLoadedClass(name);
-            if (type == null) type = defineClass(name, bytes, 0, bytes.length);
+            if (type == null) type = defineClass(name, bytes, 0, bytes.length, source);
             if (resolve) resolveClass(type);
             return type;
         }
@@ -106,7 +107,61 @@ public final class NativeBootstrapCheck {
             "Invalid package replaced existing native image");
     }
 
+    private static void checkDiscovery(Path archive) throws Exception {
+        archive=archive.toAbsolutePath().normalize();
+        String name="com.himitsu.secret.bridge.EarlyBootstrapService";
+        byte[] bytes;
+        try(var zip=new ZipFile(archive.toFile())) {
+            check(zip.getEntry("META-INF/services/net.minecraftforge.forgespi.locating.IModLocator")!=null,"service jar lacks a Forge locator");
+            try(var in=zip.getInputStream(zip.getEntry(name.replace('.','/')+".class"))) {bytes=in.readAllBytes();}
+        }
+        var loader=new Isolated(name,bytes,Map.of());
+        loader.source=new java.security.ProtectionDomain(new java.security.CodeSource(archive.toUri().toURL(),(java.security.cert.Certificate[])null),null);
+        var locator=(net.minecraftforge.forgespi.locating.IModLocator)loader.loadClass(name).getConstructor().newInstance();
+        var version=net.minecraftforge.fml.loading.FMLLoader.class.getDeclaredField("versionInfo");
+        version.setAccessible(true);
+        version.set(null,new net.minecraftforge.fml.loading.VersionInfo("47.4.23","1.20.1","20230612.114412","net.minecraftforge"));
+        var found=locator.scanMods();
+        check(found.size()==1 && found.get(0).ex()==null,"self locator did not return a valid mod: "+found);
+        var mod=found.get(0).file();
+        check(mod.getModInfos().size()==1 && mod.getModInfos().get(0).getModId().equals("secret"),"Secret was not registered as a game mod");
+        check(mod.getFilePath().toAbsolutePath().normalize().equals(archive),"locator changed another mod path");
+        try(var jar=new java.util.jar.JarFile(archive.toFile())) {
+            check(mod.getModInfos().get(0).getVersion().toString().equals(jar.getManifest().getMainAttributes().getValue("Implementation-Version")),"Forge version does not match the packaged implementation");
+        }
+        var serviceJar=cpw.mods.jarhandling.SecureJar.from(archive);
+        check(serviceJar.name().equals("secret.bootstrap") && mod.getSecureJar().name().equals("secret"),"service/game module names not isolated");
+        check(serviceJar.moduleDataProvider().descriptor().exports().isEmpty(),"service exports game packages");
+        // Only the parent module identities are modeled; Forge's real parser and game metadata are used above.
+        var parents=new HashMap<String,java.lang.module.ModuleReference>();
+        for(String dependency:java.util.List.of("cpw.mods.modlauncher","fmlloader","net.minecraftforge.forgespi")) {
+            var descriptor=java.lang.module.ModuleDescriptor.newModule(dependency);
+            descriptor.exports(dependency.equals("cpw.mods.modlauncher") ? "cpw.mods.modlauncher.api"
+                : dependency.equals("net.minecraftforge.forgespi") ? "net.minecraftforge.forgespi.locating" : "net.minecraftforge.fml.loading.moddiscovery");
+            var reference=new java.lang.module.ModuleReference(descriptor.build(),java.net.URI.create("check:/"+dependency)) {
+                @Override public java.lang.module.ModuleReader open() throws IOException {throw new IOException("descriptor-only fixture");}
+            };
+            parents.put(dependency,reference);
+        }
+        var parentFinder=new java.lang.module.ModuleFinder() {
+            public java.util.Optional<java.lang.module.ModuleReference> find(String n) {return java.util.Optional.ofNullable(parents.get(n));}
+            public java.util.Set<java.lang.module.ModuleReference> findAll() {return java.util.Set.copyOf(parents.values());}
+        };
+        var parentConfiguration=ModuleLayer.boot().configuration().resolve(parentFinder,java.lang.module.ModuleFinder.of(),parents.keySet());
+        var parentLayer=ModuleLayer.boot().defineModulesWithOneLoader(parentConfiguration,NativeBootstrapCheck.class.getClassLoader());
+        var serviceConfiguration=parentConfiguration.resolveAndBind(cpw.mods.cl.JarModuleFinder.of(serviceJar,serviceJar),java.lang.module.ModuleFinder.of(),java.util.List.of("secret.bootstrap"));
+        var service=parentLayer.defineModulesWithOneLoader(serviceConfiguration,NativeBootstrapCheck.class.getClassLoader());
+        var gameConfiguration=serviceConfiguration.resolveAndBind(cpw.mods.cl.JarModuleFinder.of(mod.getSecureJar()),java.lang.module.ModuleFinder.of(),java.util.List.of("secret"));
+        var game=service.defineModulesWithOneLoader(gameConfiguration,NativeBootstrapCheck.class.getClassLoader());
+        Class<?> early=Class.forName(BOOTSTRAP,false,service.findLoader("secret.bootstrap"));
+        Class<?> runtime=Class.forName(BOOTSTRAP,false,game.findLoader("secret"));
+        check(early!=runtime && early.getModule().getLayer()==service && runtime.getModule().getLayer()==game,"service/game bridge class ownership collapsed");
+        check(!SecretNative.isLoaded(),"discovery check initialized native code");
+        System.out.println("MOD_DISCOVERY_PASS secret_registered duplicate_service_paths game_layer_separate NO_GAME_NO_NATIVE_LOAD");
+    }
+
     public static void main(String[] args) throws Exception {
+        checkDiscovery(Path.of(args[0]));
         check(System.mapLibraryName("himitsu").equals(IMAGE), "Windows native package required");
         byte[] original;
         Map<String, byte[]> resources = new HashMap<>();

@@ -2,10 +2,10 @@
 
 公开开发仓库：[Scorn522/Scorn-Secret](https://github.com/Scorn522/Scorn-Secret)。本地维护者 Scorn；上游作者署名及各组件许可证保留。
 
-当前候选：[Secret-4.3-local-test-r15.jar](releases/Secret-4.3-local-test-r15.jar)（1,489,743 字节）。r15 已通过构建与离线检查，尚未完成实机验收；后续四件物品的加强方案仍处于审查阶段，未包含在本候选中。检查源码留在开发源集，不打入游戏 JAR。
+当前发布候选：[Secret-4.3-local-test-r18.jar](releases/Secret-4.3-local-test-r18.jar)（1,527,412 字节）。第三部分首批已完成：自身字节码基线收敛、Owner 非有限坐标/速度直写补偿、包版本绑定。构建及离线检查通过，未部署。当前实例仍为用户安装的 r17-fix1；其最新实机日志确认 JVMTI 全程健康、环境重建 0 次、完整保存及退出码 0；r18 尚未实机验收。
 
 
-基于 `Secret-4.3-local-test-r2`，固定开发目录为 `D:\桌面\Secret-4.3-dev`。版本 `4.3-local-test-r15`，保留原 Mod ID、Java/JNI 命名与资源。原始下载源码及独立 Scorn Secret 工程没有覆盖。
+基于 `Secret-4.3-local-test-r2`，固定开发目录为 `D:\桌面\Secret-4.3-dev`。版本 `4.3-local-test-r18`，保留原 Mod ID、Java/JNI 命名与资源。原始下载源码及独立 Scorn Secret 工程没有覆盖。
 
 ## 本批行为
 
@@ -22,7 +22,7 @@
 ## 构建
 
 设置 JDK17 的 `JAVA_HOME`，Python 和 Zig 0.13.0 可分别用 `HIMITSU_PYTHON`、`HIMITSU_ZIG` 指定，然后执行 `./gradlew.bat build --console=plain`。
-默认仅编译、离线检查和打包，不启动游戏、部署或上传。最终包为 `build/libs/Secret-4.3-local-test-r15.jar`，不要安装 intermediate JAR。原 r2 的本地开发配置和退出协调修复保留。
+默认仅编译、离线检查和打包，不启动游戏、部署或上传。最终包为 `build/libs/Secret-4.3-local-test-r18.jar`，不要安装 intermediate JAR。原 r2 的本地开发配置和退出协调修复保留。
 
 ## 证据与边界
 
@@ -193,3 +193,86 @@ build-r14-final.log 完整构建成功（36 秒，24 项任务：11 项执行、
 本轮只构建和离线检查，不部署、不启动游戏、不提交推送。容器直接写绕过入场钩子的缺口是此次移除代理的明确边界；没有用离线检查宣称游戏性能或攻防实机通过。
 
 最终完整构建成功：50 秒，24 项任务（11 项执行、13 项复用）。Java 实际编译；Native 生产源码未改，最终构建复用已有 Native 产物与已通过的退出检查。桥接、引导、目标/生命周期检查本轮通过。生产 class 从 111 个减为 95 个，新增为 0；最终包及加密前输入没有测试类、测试 DLL、脚本或日志。候选 1489743 字节（约 1.49 MB），SHA-256：`972FB4A99A82DDC128B19871B38E1A9CE423F700081E50B4274BD1A4FE89A80D`。实例仍保留 r14，本批未部署。
+
+
+## r16 Java 处决与保护闭环（2026-11-06）
+
+基线为 `80e508c` 的 r15；r13 `CivilizationSurvivalHooks` 保持逐字节一致，weaponAttack / weaponSwing 未改。本批仅修改既有 Java、接线资源、版本及既有检查文件，Native 生产源码未改，没有新增生产文件或生产类。
+
+- **死亡继承**：Clone 先核对真实连接、服务器和 UUID，只迁移同会话新对象；在监听器和玩家表完成交接后再执行、发布最终身份。不把同 UUID 的任意对象直接当作继承者。死亡维护按登记时建立的分世界玩家数组读取，删除全服玩家扫描、每 Tick 锁表复制及无变化的整表清理；正常连接关闭释放会话状态。
+- **写入口保护**：在既有 OwnerSafetyHooks 中接入 Entity.remove/setRemoved/kill 与 LivingEntity.setHealth/heal、Entity.revive。处决优先于 Owner，正常重生、换维度和退服沿用生命周期作用域。补齐 Entity、AttributeInstance、AttributeMap 的一次定向重转换和必检审计；LivingEntity 仍通过已有武器安装批次接线。没有拦截 disconnect、挖掘包或普通药水使用。
+- **秘密实体拓扑**：入界完成后才登记，每个实际 Level 保留首个权威 Secret；按玩家/Secret 各自合法在场条件修复索引、Tick 与节区。节区丢失时重建并修正原版移动回调的节区引用，保留未知自定义回调。世界卸载先关闭维护并移除锚点；维度注册表和客户端代理分别解绑，不向已卸载世界重新填实体。
+- **定向抽检与清理重试**：账本变更时预建分维度 Token/ID 数组，Tick 尾只核对已处决目标的 ID、UUID 和活动 Tick 槽位；数值 ID 被无关实体复用时不误删。没有恢复同步代理或全世界周期扫描。明确清理失败保留弱引用，自动重试最多三次、间隔至少 20 个服务端 Tick、每世界每 Tick 最多一个到期目标；重复拒签不重置额度，新一次明确命中可重开。未知持久化结构仍不猜测、不中断其他目标处置。
+- **常态开销**：Owner 查询继续只读身份快照；AttributeMap 未命中 Owner 立即返回，命中才登记迟到属性。实体锚点维护数组也只在登记/释放时重建。新增正常抽检不分配临时数组、不爬栈、不加热读锁；异常修复仍可分配和复制相关容器，未测量实际 FPS。
+
+完整 `gradlew.bat build --offline --console=plain --no-daemon` 成功：46 秒，24 项任务（14 项执行、10 项复用）。Java 本轮实际编译；最终构建复用已有生产 Native DLL。桥接注册、引导包完整性、Java 退出、Native 退出及目标守卫检查本轮执行通过；`test` 无源，实际回归由 `checkTargetGuards` 等现有检查任务运行。没有另跑生产 DLL 的 `checkNativeStartup`，未宣称 Native 强化或 Forge 实机验收完成。
+
+新增离线检查覆盖 Clone 未就绪/就绪交接、同 UUID 异会话隔离、迟到属性索引与合法属性作用域、健康/移除守卫、原版 Tick 双表交换、ID 复用与 UUID 残留、三次重试上限及再次命中、节区回调重接、跨维度首实例及卸载屏障。首次离线检查因普通 JVM 缺少 Forge 事件类转换而不能创建网络监听表；已只在既有检查夹具中准备对应事件表，未修改生产网络实现。
+
+最终包 1,514,597 字节，SHA-256：`08304FC70F570602BF3B44A5DC1878CC3B6450CA3C41A92C9BC98E835087C3EF`。生产 class 仍为 95 个；最终包及加密前输入均无检查类、测试 DLL、验证脚本或日志。r13 挂钩 SHA-256：`05F0CA04266AA07F7B38487908EE880F057CDB586D40531BF9049D3DC843974F`。起止 HEAD 均为 `80e508c`，既有未跟踪 CFR 文件保留；未部署、未启动游戏、未提交推送。
+
+
+## r16-fix1 引导服务与 Forge Mod 登记修复（2026-11-06）
+
+用户报告 r15/r16 均不在 Mod 列表中。核对 03:44 的实际 `debug.log`：正确实例发现 r16 的 `secret-bootstrap` 服务，但 Forge 游戏 Mod 扫描只登记 minecraft、forge、smartlook，没有 secret。对当前 Forge 47.4.23 的 `ModsFolderLocator.scanCandidates` / `ModDirTransformerDiscoverer.allExcluded` 定点检查确认：引导服务 JAR 被默认 Mod 文件扫描器排除。原 EarlyBootstrapService 只有服务入口，没有把自身重新登记为游戏 Mod。r13/r14 包也含同一服务声明；缺少那些可用场次的完整发现日志，不能据此断言此前由哪个外部组件或重启路径完成加载。
+
+- 既有 EarlyBootstrapService 同时承担 Forge IModLocator，仅返回自己的真实 JAR 路径；新增一个 SPI 资源声明，不扫描其他 Mod，不修改 Forge 排除表。
+- 同一 JAR 在服务/游戏两层直接使用自动模块会出现包导出或同名读取冲突。构建用已有 Forge ASM 依赖生成 541 字节 `module-info.class`：服务模块名为 `secret.bootstrap`，不导出业务包；Forge 游戏模块仍为 `secret`。保留单 JAR、双阶段 Native 引导，针对 PCL 的 LWJGL 类路径在启动时接上模块读取关系。
+- 加密工具将模块描述作为明文装载元数据保留，不混入加密业务类或 Native 真值类列表。没有新增生产 Java 类型，业务 class 仍为 95 个；加密前 JAR 另外多一个 JVM 模块描述，合计 96 个 `.class` 条目。r13 攻击/挥击文件未变，Native 生产源码未变。
+- 在现有 NativeBootstrapCheck 中增加真实 Forge Mod 文件解析、自身路径与 ID 核对，以及服务/游戏配置解析和独立类身份检查。父模块依赖仅建描述夹具，未模拟启动整个 Forge；独立生产 DLL 检查仍验证双加载器、90 个认证业务类、真值恢复、线程保护及退出。
+
+`build checkNativeStartup --offline --console=plain --no-daemon` 成功，40 秒，26 项任务（14 项执行、12 项复用）。Java 在前序本轮编译完成，最终构建复用；生产 Native DLL 复用。MOD_DISCOVERY、既有桥接/引导/目标检查、Java/Native 退出与生产 DLL 独立启动均通过，检查进程退出码 0。没有启动 Minecraft，也未验证新包的实机 Mod 列表、物品或 FPS。
+
+候选及安装包均为 1,516,449 字节，SHA-256：`57B2ADAEB1727CD8CA1F168E693BC5105DBE916A4B7666A20AC09F4276B7D598`。已备份 r16 到 `.work/deploy-r16-fix1-20261106-041305`，部署 r16-fix1 并移出实例 r16；其他 Mod 文件名、大小、修改时间未变。测试类、测试 DLL、脚本和日志未进入游戏包；未提交推送。
+
+
+## r17 Native 线程保护与安全退出（2026-11-06）
+
+工作基线为已确认加载正常的 r16-fix1 未提交工作区，起止 HEAD 均为 `80e508c`。保留此前 Java 闭环、Forge 自登记和服务模块隔离，r13 weaponAttack / weaponSwing 源文件逐字节不变。原有未跟踪 CFR 文件保留。本批不部署、不启动 Minecraft、不提交推送。
+
+- **精确线程归属**：启动前 ProtectThread 只登记 Java GlobalRef；通过可信 JVMTI GetCurrentThread 与 IsSameObject 确认是当前执行线程后才复制 OS 句柄。维护线程在入口补登记；JVMTI/模块守护线程先挂起创建、登记句柄，再恢复运行。不会把初始化主线程误绑到待启动线程。
+- **引用寿命收敛**：RuntimeState 发布不可变引用快照，读者用在途计数固定寿命。保护撤销、类转换与渲染回调替换统一延迟释放旧引用；JNI 调用及 DeleteGlobalRef 均在锁外。删除旧的共享可变保护向量和持锁 JNI 读写路径。回调回滚核对该槽位版本，保留并发的其他状态更新。
+- **Win32 边界**：从 kernelbase 动态解析 CompareObjectHandles，以底层线程对象身份核对低权限复制句柄；Kernel32/KernelBase 入口按实际地址去重，使用现有 MinHook。拒绝 SuspendThread 返回 DWORD(-1)，拒绝 TerminateThread 返回 FALSE，均设置 ERROR_ACCESS_DENIED。普通线程保持原操作语义；MinHook 私有维护作用域及确认属于 JVM 映像的必要挂起调用放行。不以线程名字或裸 TID 作身份判据。
+- **附加与分离**：初始化及恢复路径一起缓存 GetEnv、AttachCurrentThreadAsDaemon、DetachCurrentThread；工作线程从同一指针组取得环境，仅在自身执行了附加时配对分离。删除监控线程普通附加后无分离的旧路径，未新增重转换心跳。
+- **退出**：自行管理的排空等待共用五秒截止时间，停止函数声明、调用和独立检查桩同步更新。正常退出后才关闭句柄和释放引用；调用或读者超时保留资源并返回未完成，重复关闭不会假报成功。Java 层记录不完整退出原因。MinHook 入口禁用后保留跳板和原函数指针；同一链路的 DirectX 退出从无限等待改为剩余期限，绘制期间有在途保护。
+- **静态开销边界**：快照只在登记/撤销/回调变化时复制，正常读取不复制集合、不持引用锁；OS 身份查询只发生在被拦截线程操作上。渲染退出保护增加固定的 Native 在途计数，不新增逐帧查栈、鉴权或 JNI 通信。未进行 FPS/JFR 对比，不宣称实测提速。函数体恢复扩展及直接系统调用绕过不属于本批。
+
+本轮完整构建及离线检查通过。首次完整构建 Java、Native 实际编译，54 秒；补齐引用单独超时检查后再次通过。最终 `build checkNativeStartup --offline --console=plain --no-daemon`：27 秒、26 项任务（15 项执行、11 项复用），Native 实际编译；Java 与未变化的独立退出模型复用本轮已通过产物。
+
+`checkNativeShutdown` 本轮实际在三个独立进程中运行：正常排空、调用超时、引用读者单独超时，全部退出码 0。覆盖锁外 JNI、旧引用固定、同一截止时间、超时不释放、晚到调用拒绝、重复关闭未完成状态。最后构建因相关输入未变化显示 UP-TO-DATE，未冒充重新执行。
+
+最终生产 DLL 的 `checkNativeStartup` 实际执行通过：预登记不保护调用方主线程、线程入口自登记、无查询权限句柄、Kernel32/KernelBase 拒绝值、普通线程挂起/恢复/终止、并发保护撤销/枚举、并发回调替换与采集、退出期间枚举均通过。日志确认 JavaVM/JVMTI/JNI 三表恢复，JNI 234 槽 ready=true；90 个认证业务类、桥接自检、Native 正常关闭及检查进程 ExitCode=0。既有 Forge 登记、Java 生命周期与 r16 目标回归继续通过；`test` 无源，实际回归由既有 check 任务执行。
+
+最终 JAR **1,526,218 字节**，业务类仍为 **95 个**，另有现有 JVM 模块描述（536 字节）；最终包及加密前输入无测试类、测试 DLL、验证脚本或日志。JAR SHA-256：`D3E00547788927FEC78B2C9E11ACC6635A53F779AE42B3E33535C5A173F6A497`；生产 DLL SHA-256：`2CDFF5D157FE20EE228E92E554A070AD03244CE990E7AA496EA5827DEDA3CC68`。安装目录 r16-fix1 的摘要未变。实机启动、四件物品对战、保存退出和 FPS 尚未针对 r17 验收。
+
+
+## r17-fix1 自身 JVMTI 恢复循环修复（2026-11-06）
+
+起止 HEAD 均为 `80e508c`，保留此前全部未提交修改。仅修改现有 Secret Native 守护、既有检查文件、版本和本文；未修改秘法或其他 Mod。r13 `weaponAttack` / `weaponSwing` 源文件摘要保持不变。
+
+- 环境成员判定在命中自身有效节点时立即返回，不因后续外部尾链超过 256 个节点或不可读而否定已找到的自身环境。明确区分“确定不在链内”和“无法完整判断”；未知状态明确报告，不盲目创建新环境。缓存位置异常时定点重新定位，失败定位限频。
+- 合并两条恢复重试分支；非等待式单次恢复准入，失败候选保持私有并复用。校验通过才发布新环境；失败保留原环境，重试间隔由 1 秒递增到最多 30 秒。停止后拒绝继续创建环境，不恢复重转换心跳。
+- 自有分发表恢复期间暂挂 ModuleGuard 的同表恢复，锁内仅更新 Native 标志，JNI/JVMTI 调用仍在锁外。表修复行为及累计次数保留，重复细节日志合并为每 10 秒最多一组，不因节流日志跳过实际修复。
+
+`build checkNativeStartup --offline --console=plain --no-daemon` 本轮成功：64 秒，26 项任务（21 执行、5 复用）。生产 Native 实际编译，Java 生产源码未改且复用；检查 Java 与检查 DLL 实际编译。`checkNativeShutdown` 正常、调用超时、引用读者超时三场景全部实际执行通过。生产 DLL 的独立 JVM 检查增加 320 个真实 JVMTI 环境，确认自身回调仍可用、没有环境重建；既有线程保护、回调发布、Forge 登记及 r16 Java 回归通过。`test` 无源，回归来自既有 check 任务。
+
+另用 PCL 的 `java-runtime-gamma-snapshot/bin/java.exe` 执行同一 `checkNativeStartup`（`-PsmokeJava`），25 秒、20 项任务（6 执行、14 复用），同样通过并以退出码 0 结束。没有启动 Forge/PCL 世界；与秘法共存及 FPS 改善尚未对新候选进行实机验收，不以离线结果代替。
+
+最终包 1,526,055 字节，95 个业务类及现有模块描述；无测试类、测试 DLL、脚本或日志。SHA-256：`ED887CC74D64C200541EE1FAA4EFD776961C446D1D4B7B0BF5E9DBEE3271C65A`。已安装 r17 的 SHA-256 仍为 `D3E00547788927FEC78B2C9E11ACC6635A53F779AE42B3E33535C5A173F6A497`。未部署、未提交推送。
+
+
+## r18 第三部分首批：基线、定向补偿与版本绑定（2026-11-06）
+
+起止 HEAD 均为 `80e508c`；保留前序所有未提交修改。仅在既有文件内实现，没有新增生产 Java 文件或内部类，r13 攻击/挥击入口逐字节不变。死亡物品模型沿用原版缺省状态，不作为待修缺陷。
+
+- **自修复基线**：`ClassDefense` 不再保存可变 Java 字节数组映射或在 Native 已认证输入之后二次覆盖它。`BootstrapPayload → SecretRuntime → ClassDefense` 全链迁移到 Native SourceShield；定义与最后使用方完成后只释放临时 Map 引用，不清零仍可能被使用的类字节。Native 源镜像初始化的短锁仅核对/发布归档状态，Java ZIP 读取、JNI 和 JVMTI 恢复全部在锁外；同源并发存储沿用既有不可变一致性核对。
+- **Owner 状态直写补偿**：在既有 `OwnerSafety.Binding` 中记录有限坐标/速度的标量快照，避免与可被覆写的 Vec3 共用引用。只有已绑定 Owner 的维护入口运行补偿；遇到 NaN、Infinity 或空位置引用才恢复，维护位置、包围盒与方块索引。正常有效移动保留原对象，零分配、无爬栈、无 JNI；不限制合法有限坐标，不扫描其他实体。重生/换维度新绑定不继承旧维度坐标。
+- **包与 Native 版本绑定**：现有打包器和生产解密器同步迁移到 HSP3，采用 HKDF-SHA256 的 extract/expand，将用途与包版本纳入派生上下文，继续以 AES-GCM 验证完整性。Gradle 将同一版本传入 Java 打包器、Native 编译及 Manifest；Forge 元数据使用 `${file.jarVersion}` 并通过实际解析断言核对。旧格式不回退，整包使用配套 DLL；临时派生密钥缓冲使用后清除。无新增依赖、网络协议或游戏内检查入口。[HKDF 规范](https://www.rfc-editor.org/rfc/rfc5869)
+
+首次完整批次实际编译 Java 与 Native，Java/Forge 登记、目标守卫、Native 退出三场景和包绑定检查通过，但独立 JVM 在原有线程压力夹具中两次触发 45 秒超时。停点为普通 OS 线程强制终止之后的并发登记；既有夹具没有等待目标进入工作函数，存在在线程 loader/TLS 初始化阶段终止它的竞态。仅为测试线程添加就绪事件后，同一生产保护、原断言和 45 秒期限下检查通过（29 秒），未放宽生产防护。测试诊断及 DLL 均不入游戏包。
+
+最终 `build checkNativeStartup -PsmokeJava=<PCL同款Java> --offline --console=plain --no-daemon` 成功：47 秒，26 项任务（13 执行、13 复用）。Java 本次重编，Native 复用本批已编译 DLL；`checkNativeShutdown` 在本批首次构建实际跑过正常、调用超时、引用读者超时三进程，最终因输入未变复用。`checkNativeStartup` 最终实际执行，生产 DLL 验证正确包可解密、错版本/错用途/改标签被拒绝；自身基线修复、合法内部回调、普通类不变、并发发布、线程保护、320 环境链与关闭全部通过，退出码 0。Owner 实际非法坐标/速度恢复、空位置与正常运动对象保留检查通过。`test` 无源，实际回归由既有 check 任务执行。
+
+最终 JAR **1,527,412 字节**，**95 个业务类**及既有模块描述，无测试类、测试 DLL、脚本或日志。SHA-256：`45E0413C55C5DD7193EFC7FFD16612AEE7C2F2C9C173D9F27B0A9872BA7FC456`。安装目录 r17-fix1 摘要仍为 `ED887CC74D64C200541EE1FAA4EFD776961C446D1D4B7B0BF5E9DBEE3271C65A`。本轮未部署、未启动游戏、未提交推送；r18 的实机攻防、FPS 和保存退出未验收。
+
+第三部分尚未整批完成：更早引导需要确认早于现有入口且依赖/目录可用的具体时序；异常强退需要区分合法关闭与攻击的可信入口；监听器/任务复活源解绑需要证明目标专属注册关系；额外混淆需要独立验证 JNI、反射和 ASM 稳定性。本批未猜测这些边界、未增加全局退出拦截或广域清理。既有已验证的目标静态引用、SavedData/BossBar 清理保留。

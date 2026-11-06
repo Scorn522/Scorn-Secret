@@ -5,6 +5,7 @@
 #include "himitsu/jvm/jvmti_guard.hpp"
 #include "himitsu/jvm/source_images.hpp"
 #include "himitsu/platform/windows/swap_buffers_hook.hpp"
+#include "himitsu/platform/windows/thread_guard.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -72,6 +73,11 @@ public:
     ClassHookScope& operator=(const ClassHookScope&) = delete;
 };
 
+struct NativeCallback {
+    bool entered=himitsu::core::RuntimeState::instance().enter_call();
+    ~NativeCallback() {if(entered) himitsu::core::RuntimeState::instance().leave_call();}
+};
+
 struct HeapClassScan {
     jlong tag;
     std::size_t tagged;
@@ -135,17 +141,11 @@ void JNICALL class_file_load_hook(
         return;
     }
     const ClassHookScope hook_scope;
+    NativeCallback call; if(!call.entered) return;
 
     auto& state = himitsu::core::RuntimeState::instance();
-    jclass transformer = nullptr;
     jmethodID method = nullptr;
-    {
-        himitsu::core::StateLock lock(state.references_lock());
-        if (state.transformer_class != nullptr) {
-            transformer = static_cast<jclass>(env->NewLocalRef(state.transformer_class));
-            method = state.transformer_method;
-        }
-    }
+    jclass transformer=state.local_callback(env,false,method);
     if (transformer == nullptr || method == nullptr) return;
 
     jstring class_name = name == nullptr ? nullptr : env->NewStringUTF(name);
@@ -537,52 +537,37 @@ static jmethodID resolve_reflected_static_method(
     return method;
 }
 
-jobject configure_class_load_hook(JNIEnv* env, jclass callback, jobject reflected_method) {
-    auto& state = core::RuntimeState::instance();
-    jclass replacement = nullptr;
-    jmethodID method = nullptr;
-    if (callback != nullptr) {
-        method = resolve_reflected_static_method(env, callback, reflected_method, transformer_signature);
-        if (method == nullptr) {
-            if (env->ExceptionCheck()) return take_exception(env);
-            return new_exception(env, "java/lang/IllegalArgumentException", "ClassLoadHook requires a matching static Method");
+jobject configure_class_load_hook(JNIEnv* env,jclass callback,jobject reflected_method) {
+    auto& state=core::RuntimeState::instance();
+    jmethodID method=nullptr;
+    if(callback) {
+        method=resolve_reflected_static_method(env,callback,reflected_method,transformer_signature);
+        if(!method) return env->ExceptionCheck()?take_exception(env):new_exception(env,"java/lang/IllegalArgumentException","ClassLoadHook requires a matching static Method");
+    }
+    jclass replacement=callback?static_cast<jclass>(env->NewGlobalRef(callback)):nullptr;
+    if(callback && !replacement) return take_exception(env);
+    while(!state.shutting_down()) {
+        core::RuntimeState::ReferenceRead prior(state,env);
+        auto next=std::make_unique<core::RuntimeState::References>(*prior.get());
+        next->transformer=replacement;next->transformer_method=method;
+        const auto version=++next->transformer_version;
+        if(!state.publish_references(prior.get(),next)) continue;
+        auto error=trusted_set_event_notification_mode(callback==nullptr&&!source_images_active()?JVMTI_DISABLE:JVMTI_ENABLE,JVMTI_EVENT_CLASS_FILE_LOAD_HOOK,nullptr);
+        if(error!=JVMTI_ERROR_NONE) {
+            while(!state.shutting_down()) {
+                core::RuntimeState::ReferenceRead current(state,env);
+                if(current->transformer_version!=version) break;
+                auto rollback=std::make_unique<core::RuntimeState::References>(*current.get());
+                rollback->transformer=prior->transformer;rollback->transformer_method=prior->transformer_method;
+                ++rollback->transformer_version;
+                if(state.publish_references(current.get(),rollback)) break;
+            }
+            return jvmti_error(env,error,"ClassFileLoadHook notification");
         }
-        replacement = static_cast<jclass>(env->NewGlobalRef(callback));
+        return boolean_value(env,true);
     }
-
-    jclass previous_class = nullptr;
-    jmethodID previous_method = nullptr;
-    {
-        himitsu::core::StateLock lock(state.references_lock());
-        previous_class = state.transformer_class;
-        previous_method = state.transformer_method;
-        state.transformer_class = replacement;
-        state.transformer_method = method;
-    }
-    HIMITSU_LOG_INFO(
-        "ClassControl",
-        "开始设置 ClassFileLoadHook 通知（模式=%s，回调=%p，方法=%p）",
-        callback == nullptr ? "禁用" : "启用",
-        replacement,
-        method
-    );
-    const jvmtiError error = trusted_set_event_notification_mode(
-        callback == nullptr && !source_images_active() ? JVMTI_DISABLE : JVMTI_ENABLE,
-        JVMTI_EVENT_CLASS_FILE_LOAD_HOOK,
-        nullptr
-    );
-    HIMITSU_LOG_INFO("ClassControl", "ClassFileLoadHook 通知设置结束（jvmti=%d）", error);
-    if (error != JVMTI_ERROR_NONE) {
-        {
-            himitsu::core::StateLock lock(state.references_lock());
-            state.transformer_class = previous_class;
-            state.transformer_method = previous_method;
-        }
-        if (replacement != nullptr) env->DeleteGlobalRef(replacement);
-        return jvmti_error(env, error, "ClassFileLoadHook notification");
-    }
-    if (previous_class != nullptr) env->DeleteGlobalRef(previous_class);
-    return boolean_value(env, true);
+    if(replacement) env->DeleteGlobalRef(replacement);
+    return new_exception(env,"java/lang/IllegalStateException","Runtime is stopping");
 }
 
 jobject define_class(JNIEnv* env, jstring name, jobject loader, jbyteArray bytes) {
@@ -671,70 +656,76 @@ jobject get_transformed_class_bytes(JNIEnv* env, jobject loader, jstring class_n
     return result;
 }
 
-jobject protect_thread(JNIEnv* env, jobject thread) {
-    if (thread == nullptr) return new_exception(env, "java/lang/IllegalArgumentException", "ProtectThread requires Thread");
-    jclass thread_type = env->FindClass("java/lang/Thread");
-    if (!env->IsInstanceOf(thread, thread_type)) return new_exception(env, "java/lang/IllegalArgumentException", "ProtectThread argument is not a Thread");
-    auto& state = core::RuntimeState::instance();
-    {
-        himitsu::core::StateLock lock(state.references_lock());
-        const bool exists = std::any_of(state.protected_threads.begin(), state.protected_threads.end(), [&](jobject value) { return env->IsSameObject(value, thread); });
-        if (!exists) state.protected_threads.push_back(env->NewGlobalRef(thread));
-        HIMITSU_LOG_INFO("ClassControl", "保护线程完成（线程=%p，总数=%zu）", thread, state.protected_threads.size());
+jobject protect_thread(JNIEnv* env,jobject thread) {
+    if(!thread) return new_exception(env,"java/lang/IllegalArgumentException","ProtectThread requires Thread");
+    jclass type=env->FindClass("java/lang/Thread");
+    bool valid=type && env->IsInstanceOf(thread,type); if(type) env->DeleteLocalRef(type);
+    if(!valid) return new_exception(env,"java/lang/IllegalArgumentException","ProtectThread argument is not a Thread");
+    jthread current=nullptr;
+    const auto error=trusted_current_thread(&current);
+    if(error!=JVMTI_ERROR_NONE) return jvmti_error(env,error,"GetCurrentThread for protection");
+    const bool self=env->IsSameObject(current,thread);if(current) env->DeleteLocalRef(current);
+    HANDLE handle=nullptr;
+    if(self && !DuplicateHandle(GetCurrentProcess(),GetCurrentThread(),GetCurrentProcess(),&handle,SYNCHRONIZE,FALSE,0))
+        return new_exception(env,"java/lang/IllegalStateException","Cannot capture protected OS thread identity");
+    jobject owned=env->NewGlobalRef(thread);
+    if(!owned) {if(handle) CloseHandle(handle);return take_exception(env);}
+    auto& state=core::RuntimeState::instance();bool success=false;
+    while(!state.shutting_down()) {
+        core::RuntimeState::ReferenceRead read(state,env);
+        std::size_t index=0;
+        while(index<read->threads.size() && (!read->threads[index].java_thread || !env->IsSameObject(read->threads[index].java_thread,thread))) ++index;
+        if(index<read->threads.size() && (!handle || read->threads[index].os_thread)) {success=true;break;}
+        auto next=std::make_unique<core::RuntimeState::References>(*read.get());
+        bool added=index==next->threads.size();
+        if(added) next->threads.push_back({owned,handle});else next->threads[index].os_thread=handle;
+        if(state.publish_references(read.get(),next)) {if(added) owned=nullptr;handle=nullptr;success=true;break;}
     }
-    return boolean_value(env, true);
+    if(owned) env->DeleteGlobalRef(owned);if(handle) CloseHandle(handle);
+    return success?boolean_value(env,true):new_exception(env,"java/lang/IllegalStateException","Thread protection was not published: runtime stopping");
 }
-
-jobject unprotect_thread(JNIEnv* env, jobject thread) {
-    if (thread == nullptr) return new_exception(env, "java/lang/IllegalArgumentException", "UnprotectThread requires Thread");
-    auto& state = core::RuntimeState::instance();
-    {
-        himitsu::core::StateLock lock(state.references_lock());
-        auto iterator = std::find_if(state.protected_threads.begin(), state.protected_threads.end(), [&](jobject value) { return env->IsSameObject(value, thread); });
-        if (iterator != state.protected_threads.end()) {
-            env->DeleteGlobalRef(*iterator);
-            state.protected_threads.erase(iterator);
-        }
-        HIMITSU_LOG_INFO("ClassControl", "取消线程保护完成（线程=%p，总数=%zu）", thread, state.protected_threads.size());
+jobject unprotect_thread(JNIEnv* env,jobject thread) {
+    if(!thread) return new_exception(env,"java/lang/IllegalArgumentException","UnprotectThread requires Thread");
+    auto& state=core::RuntimeState::instance();
+    while(!state.shutting_down()) {
+        core::RuntimeState::ReferenceRead read(state,env);
+        std::size_t index=0;
+        while(index<read->threads.size() && (!read->threads[index].java_thread || !env->IsSameObject(read->threads[index].java_thread,thread))) ++index;
+        if(index==read->threads.size()) return boolean_value(env,true);
+        auto next=std::make_unique<core::RuntimeState::References>(*read.get());next->threads.erase(next->threads.begin()+index);
+        if(state.publish_references(read.get(),next)) return boolean_value(env,true);
     }
-    return boolean_value(env, true);
+    return boolean_value(env,false);
 }
-
-jobject bind_render(JNIEnv* env, jclass callback, jobject reflected_method) {
-    if (callback == nullptr || reflected_method == nullptr) {
-        return new_exception(env, "java/lang/IllegalArgumentException", "BindRender requires callback Class and Method");
-    }
-    jmethodID method = resolve_reflected_static_method(env, callback, reflected_method, render_signature);
-    if (method == nullptr) {
-        if (env->ExceptionCheck()) return take_exception(env);
-        return new_exception(env, "java/lang/IllegalArgumentException", "BindRender requires a matching static Method");
-    }
-
-    auto& state = core::RuntimeState::instance();
-    jobject replacement = env->NewGlobalRef(callback);
-    {
-        himitsu::core::StateLock lock(state.references_lock());
-        if (state.render_callback_class != nullptr) {
-            env->DeleteGlobalRef(state.render_callback_class);
+jobject bind_render(JNIEnv* env,jclass callback,jobject reflected_method) {
+    if(!callback || !reflected_method) return new_exception(env,"java/lang/IllegalArgumentException","BindRender requires callback Class and Method");
+    jmethodID method=resolve_reflected_static_method(env,callback,reflected_method,render_signature);
+    if(!method) return env->ExceptionCheck()?take_exception(env):new_exception(env,"java/lang/IllegalArgumentException","BindRender requires a matching static Method");
+    jclass replacement=static_cast<jclass>(env->NewGlobalRef(callback));
+    if(!replacement) return take_exception(env);
+    auto& state=core::RuntimeState::instance();
+    while(!state.shutting_down()) {
+        core::RuntimeState::ReferenceRead prior(state,env);
+        auto next=std::make_unique<core::RuntimeState::References>(*prior.get());
+        next->render=replacement;next->render_method=method;const auto version=++next->render_version;
+        if(!state.publish_references(prior.get(),next)) continue;
+        bool success=himitsu::platform::windows::install_swap_buffers_hook();
+        if(!success) while(!state.shutting_down()) {
+            core::RuntimeState::ReferenceRead current(state,env);if(current->render_version!=version) break;
+            auto rollback=std::make_unique<core::RuntimeState::References>(*current.get());
+            rollback->render=prior->render;rollback->render_method=prior->render_method;++rollback->render_version;
+            if(state.publish_references(current.get(),rollback)) break;
         }
-        state.render_callback_class = static_cast<jclass>(replacement);
-        state.render_callback_method = method;
+        return boolean_value(env,success);
     }
-    const bool installed = himitsu::platform::windows::install_swap_buffers_hook();
-    return boolean_value(env, installed);
+    env->DeleteGlobalRef(replacement);
+    return new_exception(env,"java/lang/IllegalStateException","Runtime is stopping");
 }
 
 jobject render_frame(JNIEnv* env, jboolean before, jint stage, jlong context) {
     auto& state = core::RuntimeState::instance();
-    jclass callback = nullptr;
     jmethodID method = nullptr;
-    {
-        himitsu::core::StateLock lock(state.references_lock());
-        if (state.render_callback_class != nullptr) {
-            callback = static_cast<jclass>(env->NewLocalRef(state.render_callback_class));
-            method = state.render_callback_method;
-        }
-    }
+    jclass callback=state.local_callback(env,true,method);
     if (callback == nullptr || method == nullptr) {
         return boolean_value(env, true);
     }
@@ -744,6 +735,7 @@ jobject render_frame(JNIEnv* env, jboolean before, jint stage, jlong context) {
 }
 
 bool invoke_render_callback(bool before, jint stage, jlong context) {
+    NativeCallback call; if(!call.entered) return true;
     auto& state = core::RuntimeState::instance();
     JavaVM* vm = state.vm();
     if (vm == nullptr) {
@@ -766,15 +758,8 @@ bool invoke_render_callback(bool before, jint stage, jlong context) {
     }
 
     bool result = true;
-    jclass callback = nullptr;
     jmethodID method = nullptr;
-    {
-        himitsu::core::StateLock lock(state.references_lock());
-        if (state.render_callback_class != nullptr) {
-            callback = static_cast<jclass>(env->NewLocalRef(state.render_callback_class));
-            method = state.render_callback_method;
-        }
-    }
+    jclass callback=state.local_callback(env,true,method);
     if (callback != nullptr && method != nullptr) {
         result = env->CallStaticBooleanMethod(
             callback,

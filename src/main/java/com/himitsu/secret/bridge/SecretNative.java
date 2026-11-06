@@ -221,7 +221,8 @@ public final class SecretNative {
         } finally {
             try {
                 invokeChecked("Shutdown");
-            } catch (Throwable ignored) {
+            } catch (Throwable failure) {
+                System.err.println("[Secret/Shutdown] Native drain incomplete: "+failure);
             } finally {
                 loaded = false;
                 shutdownThread = null;

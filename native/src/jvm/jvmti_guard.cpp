@@ -5,6 +5,8 @@
 #include "himitsu/core/runtime_state.hpp"
 #include "himitsu/jvm/class_control.hpp"
 #include "himitsu/jvm/late_recovery.hpp"
+#include "himitsu/platform/windows/thread_guard.hpp"
+#include "himitsu/platform/windows/module_guard.hpp"
 
 #include <windows.h>
 
@@ -30,7 +32,8 @@ using GenerateEventsFn = decltype(jvmtiInterface_1_::GenerateEvents);
 using GetPhaseFn = decltype(jvmtiInterface_1_::GetPhase);
 using GetCapabilitiesFn = decltype(jvmtiInterface_1_::GetCapabilities);
 using VmGetEnvFn = decltype(JNIInvokeInterface_::GetEnv);
-using VmAttachFn = decltype(JNIInvokeInterface_::AttachCurrentThread);
+using VmAttachFn = decltype(JNIInvokeInterface_::AttachCurrentThreadAsDaemon);
+using VmDetachFn = decltype(JNIInvokeInterface_::DetachCurrentThread);
 
 constexpr jint EVENT_SLOTS = 128;
 
@@ -54,7 +57,8 @@ struct GuardState {
     GetCapabilitiesFn get_capabilities = nullptr;
 
     VmGetEnvFn vm_get_env = nullptr;
-    VmAttachFn vm_attach = nullptr;
+    VmAttachFn vm_attach_daemon = nullptr;
+    VmDetachFn vm_detach = nullptr;
 
     jvmtiCapabilities required_capabilities{};
     jvmtiEventCallbacks required_callbacks{};
@@ -71,9 +75,39 @@ struct GuardState {
     std::atomic<jvmtiEnv**> environment_head_slot{nullptr};
     std::atomic<bool> environment_linked{true};
     std::atomic<unsigned int> chain_recovery_failures{0};
+    std::atomic<bool> refreshing{false};
+    std::atomic<ULONGLONG> next_refresh{0};
+    jvmtiEnv* pending_env = nullptr; // Only the nonblocking refresh owner may change this.
 };
 
 GuardState state;
+
+void cache_vm_calls(JavaVM* vm) {
+    const auto* table=vm?vm->functions:nullptr;
+    AcquireSRWLockExclusive(&state.lock);
+    state.vm=vm;
+    state.vm_get_env=table?table->GetEnv:nullptr;
+    state.vm_attach_daemon=table?table->AttachCurrentThreadAsDaemon:nullptr;
+    state.vm_detach=table?table->DetachCurrentThread:nullptr;
+    ReleaseSRWLockExclusive(&state.lock);
+}
+struct VmAccess {
+    JavaVM* vm=nullptr; VmGetEnvFn get_env=nullptr; VmDetachFn detach=nullptr;
+    JNIEnv* env=nullptr; bool attached=false; jint result=JNI_ERR;
+    VmAccess() {
+        VmAttachFn attach=nullptr;
+        AcquireSRWLockShared(&state.lock);
+        vm=state.vm;get_env=state.vm_get_env;attach=state.vm_attach_daemon;detach=state.vm_detach;
+        ReleaseSRWLockShared(&state.lock);
+        if(!vm || !get_env) return;
+        result=get_env(vm,reinterpret_cast<void**>(&env),JNI_VERSION_1_8);
+        if(result==JNI_EDETACHED && attach && detach) {
+            result=attach(vm,reinterpret_cast<void**>(&env),nullptr);attached=result==JNI_OK;
+        }
+    }
+    ~VmAccess() {if(attached) detach(vm);}
+};
+
 
 constexpr std::size_t JVMTI_ENV_MAGIC_OFFSET = 0x08;
 constexpr std::size_t JVMTI_ENV_NEXT_OFFSET = 0x10;
@@ -178,10 +212,37 @@ jvmtiEnv** locate_environment_head_slot(jvmtiEnv* preferred) {
     return best_slot;
 }
 
+// Membership is a prefix query. A foreign tail must not invalidate our live node.
+// Unknown (an unreadable/truncated chain) is distinct from a proven absence.
+enum class EnvironmentLink { unknown, linked, absent };
+EnvironmentLink environment_link(jvmtiEnv** head_slot, jvmtiEnv* target) {
+    if (!head_slot || !readable_memory(head_slot, sizeof(void*)) || !target)
+        return EnvironmentLink::unknown;
+    jvmtiEnv* node = *head_slot;
+    for (std::size_t count = 0; node && count < MAX_JVMTI_ENVIRONMENTS; ++count) {
+        if (!valid_environment_node(node)) return EnvironmentLink::unknown;
+        if (node == target) return EnvironmentLink::linked;
+        jvmtiEnv* next = environment_next(node);
+        if (next == node) return EnvironmentLink::unknown;
+        node = next;
+    }
+    return node ? EnvironmentLink::unknown : EnvironmentLink::absent;
+}
 bool environment_chain_contains(jvmtiEnv** head_slot, jvmtiEnv* target) {
-    if (head_slot == nullptr || !readable_memory(head_slot, sizeof(void*)) || target == nullptr) return false;
-    const EnvironmentChainInspection inspected = inspect_environment_chain(*head_slot, target);
-    return inspected.valid && inspected.contains_preferred;
+    return environment_link(head_slot, target) == EnvironmentLink::linked;
+}
+EnvironmentLink resolve_environment_link(jvmtiEnv* target) {
+    auto* slot = state.environment_head_slot.load(std::memory_order_acquire);
+    EnvironmentLink link = environment_link(slot, target);
+    if (link == EnvironmentLink::linked) return link;
+    // Recheck the cached location before rebuilding an environment. Discovery is
+    // used only on a transition/recovery attempt, never on the ordinary tick path.
+    auto* relocated = locate_environment_head_slot(target);
+    if (relocated && environment_chain_contains(relocated, target)) {
+        state.environment_head_slot.store(relocated, std::memory_order_release);
+        return EnvironmentLink::linked;
+    }
+    return environment_link(slot, target);
 }
 
 struct VmStructLayout {
@@ -473,216 +534,156 @@ bool restore_environment(jvmtiEnv* fresh) {
 }
 
 bool refresh_impl() {
-    HIMITSU_LOG_INFO("JvmtiGuard", "开始刷新 JVMTI 环境（旧环境=%p，代数=%llu）",
-        current_env(), state.generation.load(std::memory_order_acquire));
-    if (JavaVM* recovered_vm = himitsu::jvm::late_recover_created_vm(); recovered_vm != nullptr) {
-        state.vm = recovered_vm;
-        state.vm_get_env = recovered_vm->functions == nullptr ? nullptr : recovered_vm->functions->GetEnv;
-        state.vm_attach = recovered_vm->functions == nullptr ? nullptr : recovered_vm->functions->AttachCurrentThread;
-        HIMITSU_LOG_INFO("JvmtiGuard", "刷新前 JavaVM 调用链恢复完成（vm=%p，GetEnv=%p）",
-            state.vm, function_address(state.vm_get_env));
+    const auto now = GetTickCount64();
+    if (state.monitor_stop.load(std::memory_order_acquire)
+        || now < state.next_refresh.load(std::memory_order_acquire)) return false;
+    bool expected = false;
+    if (!state.refreshing.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return false;
+    // This is a non-waiting admission flag, not a lock across JNI/Safepoints.
+    // Failed candidates stay private and are reused instead of leaking one GetEnv per poll.
+    bool table_update = false;
+    jvmtiEnv* previous = current_env();
+    auto* previous_table = state.table;
+    const bool success = [&] {
+        if (state.monitor_stop.load(std::memory_order_acquire)) return false;
+        HIMITSU_LOG_INFO("JvmtiGuard", "开始刷新 JVMTI 环境（旧环境=%p，代数=%llu）",
+            previous, state.generation.load(std::memory_order_acquire));
+        if (!state.pending_env) {
+            if (JavaVM* vm = himitsu::jvm::late_recover_created_vm(); vm) cache_vm_calls(vm);
+        }
+        VmAccess access;
+        if (access.result != JNI_OK || !access.env || !access.get_env) return false;
+        if (!state.pending_env) {
+            jvmtiEnv* fresh = nullptr;
+            const jint result = access.get_env(access.vm, reinterpret_cast<void**>(&fresh), JVMTI_VERSION_1_2);
+            if (result != JNI_OK || !fresh) return false;
+            state.pending_env = fresh;
+        }
+        jvmtiEnv* fresh = state.pending_env;
+        if (resolve_environment_link(fresh) != EnvironmentLink::linked) return false;
+        himitsu::platform::windows::suspend_jvmti_table_restore(true);
+        table_update = true;
+        if (!himitsu::jvm::late_recover_jvmti_dispatch(fresh)) return false;
+        bind_recovered_dispatch(fresh);
+        jvmtiPhase phase{};
+        if (!state.get_phase || state.get_phase(fresh, &phase) != JVMTI_ERROR_NONE
+            || phase == JVMTI_PHASE_DEAD || !restore_environment(fresh)) return false;
+        jvmtiCapabilities required{}, verified{};
+        AcquireSRWLockShared(&state.lock);
+        required = state.required_capabilities;
+        ReleaseSRWLockShared(&state.lock);
+        if (!state.get_capabilities || state.get_capabilities(fresh, &verified) != JVMTI_ERROR_NONE
+            || !capabilities_contained(verified, required) || !restore_public_guard_slots()
+            || resolve_environment_link(fresh) != EnvironmentLink::linked
+            || state.monitor_stop.load(std::memory_order_acquire)) return false;
+        state.env.store(fresh, std::memory_order_release);
+        state.pending_env = nullptr;
+        state.environment_linked.store(true, std::memory_order_release);
+        state.healthy.store(true, std::memory_order_release);
+        state.generation.fetch_add(1, std::memory_order_acq_rel);
+        himitsu::core::RuntimeState::instance().replace_jvmti(fresh);
+        // Only retire our own old callbacks; foreign environments are untouched.
+        if (previous && previous != fresh && valid_environment_node(previous)) {
+            jvmtiEventCallbacks empty{};
+            state.set_event_callbacks(previous, &empty, sizeof(empty));
+        }
+        HIMITSU_LOG_INFO("JvmtiGuard", "JVMTI 环境刷新完成（env=%p，阶段=%d，链内=是）", fresh, phase);
+        return true;
+    }();
+    if (table_update) {
+        if (!success) {
+            if (state.pending_env && valid_environment_node(state.pending_env) && state.set_event_callbacks) {
+                jvmtiEventCallbacks empty{};
+                state.set_event_callbacks(state.pending_env, &empty, sizeof(empty));
+            }
+            restore_public_guard_slots();
+            state.table = previous_table;
+        }
+        himitsu::platform::windows::suspend_jvmti_table_restore(false);
     }
-    if (state.vm == nullptr || state.vm_get_env == nullptr) {
-        HIMITSU_LOG_ERROR("JvmtiGuard", "刷新 JVMTI 的前置项缺失（vm=%p，getEnv=%p）", state.vm, function_address(state.vm_get_env));
-        return false;
+    if (success) {
+        state.chain_recovery_failures.store(0, std::memory_order_release);
+        state.next_refresh.store(0, std::memory_order_release);
+    } else {
+        const unsigned int failures = state.chain_recovery_failures.fetch_add(1, std::memory_order_acq_rel) + 1;
+        const ULONGLONG delay = std::min<ULONGLONG>(30000, 1000ULL << std::min(failures - 1, 5u));
+        state.next_refresh.store(GetTickCount64() + delay, std::memory_order_release);
+        HIMITSU_LOG_WARNING("JvmtiGuard", "JVMTI recovery deferred; previous environment retained (failures=%u retry_ms=%llu candidate=%p)",
+            failures, delay, state.pending_env);
     }
-    JNIEnv* jni = nullptr;
-    jint result = state.vm_get_env(state.vm, reinterpret_cast<void**>(&jni), JNI_VERSION_1_8);
-    if (result == JNI_EDETACHED && state.vm_attach != nullptr) {
-        result = state.vm_attach(state.vm, reinterpret_cast<void**>(&jni), nullptr);
-        HIMITSU_LOG_INFO("JvmtiGuard", "刷新线程附加 JVM 结束（jni=%d，env=%p）", result, jni);
-    }
-    if (result != JNI_OK || jni == nullptr) {
-        HIMITSU_LOG_ERROR("JvmtiGuard", "刷新过程中获取 JNIEnv 失败（jni=%d，env=%p）", result, jni);
-        return false;
-    }
-
-    jvmtiEnv* fresh = nullptr;
-    result = state.vm_get_env(state.vm, reinterpret_cast<void**>(&fresh), JVMTI_VERSION_1_2);
-    if (result != JNI_OK || fresh == nullptr) {
-        HIMITSU_LOG_ERROR("JvmtiGuard", "刷新过程中 GetEnv(JVMTI) 调用失败（jni=%d，env=%p）", result, fresh);
-        return false;
-    }
-
-    if (!himitsu::jvm::late_recover_jvmti_dispatch(fresh)) {
-        HIMITSU_LOG_ERROR("JvmtiGuard", "新 JVMTI 环境的分发表与函数体恢复失败（env=%p）", fresh);
-        return false;
-    }
-    bind_recovered_dispatch(fresh);
-
-    jvmtiPhase phase{};
-    if (state.get_phase == nullptr || state.get_phase(fresh, &phase) != JVMTI_ERROR_NONE) {
-        HIMITSU_LOG_ERROR("JvmtiGuard", "刷新过程的阶段校验失败（env=%p）", fresh);
-        return false;
-    }
-    if (!restore_environment(fresh)) {
-        HIMITSU_LOG_ERROR("JvmtiGuard", "刷新过程的能力或回调恢复失败（env=%p）", fresh);
-        return false;
-    }
-    if (!restore_public_guard_slots()) {
-        HIMITSU_LOG_ERROR("JvmtiGuard", "刷新后的公开 JVMTI 守护槽重装失败（env=%p）", fresh);
-        return false;
-    }
-
-    jvmtiCapabilities required{};
-    AcquireSRWLockShared(&state.lock);
-    required = state.required_capabilities;
-    ReleaseSRWLockShared(&state.lock);
-    jvmtiCapabilities verified{};
-    const jvmtiError capability_error = state.get_capabilities == nullptr
-        ? JVMTI_ERROR_NOT_AVAILABLE
-        : state.get_capabilities(fresh, &verified);
-    if (capability_error != JVMTI_ERROR_NONE || !capabilities_contained(verified, required)) {
-        log_capability_state("刷新后的能力校验失败", verified, required, capability_error, JVMTI_ERROR_NONE);
-        return false;
-    }
-
-    state.env.store(fresh, std::memory_order_release);
-    jvmtiEnv** head_slot = state.environment_head_slot.load(std::memory_order_acquire);
-    const bool linked = head_slot == nullptr || environment_chain_contains(head_slot, fresh);
-    state.environment_linked.store(linked, std::memory_order_release);
-    state.healthy.store(linked, std::memory_order_release);
-    state.generation.fetch_add(1, std::memory_order_acq_rel);
-    himitsu::core::RuntimeState::instance().replace_jvmti(fresh);
-    HIMITSU_LOG_INFO("JvmtiGuard", "JVMTI 环境刷新完成（env=%p，阶段=%d，链内=%s）",
-        fresh, phase, linked ? "是" : "否");
-    return linked;
+    state.refreshing.store(false, std::memory_order_release);
+    return success;
 }
 
 DWORD WINAPI monitor_worker(void*) {
-    JNIEnv* jni = nullptr;
-    if (state.vm != nullptr && state.vm_get_env != nullptr) {
-        jint status = state.vm_get_env(state.vm, reinterpret_cast<void**>(&jni), JNI_VERSION_1_8);
-        if (status == JNI_EDETACHED && state.vm_attach != nullptr) {
-            state.vm_attach(state.vm, reinterpret_cast<void**>(&jni), nullptr);
-        }
+    VmAccess access;
+    JNIEnv* jni=access.env;
+    if(access.result!=JNI_OK || !jni) {
+        HIMITSU_LOG_ERROR("JvmtiGuard","Monitor daemon attachment failed: %d",access.result);
+        return 1;
     }
     HIMITSU_LOG_INFO("JvmtiGuard", "JVMTI 健康监控线程已启动（线程ID=%lu，jni=%p，周期=250ms）",
         GetCurrentThreadId(), jni);
 
     unsigned int summary_tick = 0;
     unsigned int chain_tick = 3;
+    bool link_reported = false;
+    EnvironmentLink link = EnvironmentLink::unknown;
+    ULONGLONG next_discovery = 0;
     while (!state.monitor_stop.load(std::memory_order_acquire)) {
-        const bool chain_was_detached = !state.environment_linked.load(std::memory_order_acquire);
-        if (chain_was_detached || ++chain_tick >= 4) {
-            chain_tick = 0;
-            jvmtiEnv** head_slot = state.environment_head_slot.load(std::memory_order_acquire);
-            if (head_slot == nullptr) {
-                head_slot = locate_environment_head_slot(current_env());
-                if (head_slot != nullptr) {
-                    state.environment_head_slot.store(head_slot, std::memory_order_release);
-                }
-            }
-            if (head_slot != nullptr) {
-                const bool linked = environment_chain_contains(head_slot, current_env());
-                state.environment_linked.store(linked, std::memory_order_release);
-                if (!linked) {
-                    if (!refresh_impl()) {
-                        const unsigned int failures = state.chain_recovery_failures.fetch_add(
-                            1, std::memory_order_acq_rel) + 1;
-                        HIMITSU_LOG_ERROR(
-                            "JvmtiGuard",
-                            "Secret JVMTI environment recreation failed（次数=%u，旧环境=%p，链首=%p）",
-                            failures,
-                            current_env(),
-                            *head_slot
-                        );
-                    }
-                }
-            }
-        }
-
+        const auto now = GetTickCount64();
         jvmtiEnv* env = current_env();
-        const bool linked = state.environment_linked.load(std::memory_order_acquire);
-        bool healthy = linked && valid_environment_node(env) && state.get_phase != nullptr;
-        const char* health_reason = !linked
-            ? "环境已脱离 HotSpot 链"
-            : (healthy ? "正常" : "环境或分发表缺失");
-        bool refresh_allowed = !healthy && linked;
-        jvmtiPhase phase{};
-        if (healthy && state.get_phase(env, &phase) != JVMTI_ERROR_NONE) {
-            healthy = false;
-            health_reason = "阶段检查失败";
-            refresh_allowed = true;
+        if (++chain_tick >= 4) {
+            chain_tick = 0;
+            link = environment_link(state.environment_head_slot.load(std::memory_order_acquire), env);
+            if (link != EnvironmentLink::linked && now >= next_discovery) {
+                link = resolve_environment_link(env);
+                next_discovery = now + 30000;
+            }
+            state.environment_linked.store(link == EnvironmentLink::linked, std::memory_order_release);
         }
-
-        jvmtiCapabilities caps{};
-        if (healthy && state.get_capabilities != nullptr) {
-            jvmtiCapabilities required{};
+        bool healthy = link == EnvironmentLink::linked && valid_environment_node(env) && state.get_phase;
+        bool recover = link == EnvironmentLink::absent || (link == EnvironmentLink::linked && !healthy);
+        jvmtiPhase phase{};
+        if (healthy) {
+            healthy = state.get_phase(env, &phase) == JVMTI_ERROR_NONE;
+            if (healthy && phase == JVMTI_PHASE_DEAD) break;
+            recover = !healthy;
+        }
+        if (healthy && state.get_capabilities) {
+            jvmtiCapabilities required{}, caps{};
             AcquireSRWLockShared(&state.lock);
             required = state.required_capabilities;
             ReleaseSRWLockShared(&state.lock);
-            jvmtiError capability_error = state.get_capabilities(env, &caps);
-            if (capability_error != JVMTI_ERROR_NONE) {
-                healthy = false;
-                health_reason = "能力查询失败";
-                refresh_allowed = true;
-            } else if (!capabilities_contained(caps, required)) {
-
-                jvmtiError repair_error = JVMTI_ERROR_NOT_AVAILABLE;
-                if (state.add_capabilities != nullptr) {
-                    repair_error = state.add_capabilities(env, &required);
-                    jvmtiCapabilities repaired{};
-                    capability_error = state.get_capabilities(env, &repaired);
-                    if (repair_error == JVMTI_ERROR_NONE
-                        && capability_error == JVMTI_ERROR_NONE
-                        && capabilities_contained(repaired, required)) {
-                        caps = repaired;
-                        HIMITSU_LOG_INFO("JvmtiGuard", "JVMTI 能力已在当前环境内恢复（env=%p）", env);
-                    } else {
-                        caps = repaired;
-                        healthy = false;
-                        health_reason = "能力不匹配";
-                        refresh_allowed = true;
-                        log_capability_state("JVMTI 能力原地恢复失败，立即刷新环境", caps, required,
-                            capability_error, repair_error);
-                    }
-                } else {
-                    healthy = false;
-                    health_reason = "能力不匹配";
-                    refresh_allowed = true;
-                }
+            const auto error = state.get_capabilities(env, &caps);
+            healthy = error == JVMTI_ERROR_NONE && capabilities_contained(caps, required);
+            if (!healthy && now >= state.next_refresh.load(std::memory_order_acquire)) {
+                // Repair our existing environment before allocating a replacement.
+                healthy = error == JVMTI_ERROR_NONE && state.add_capabilities
+                    && state.add_capabilities(env, &required) == JVMTI_ERROR_NONE
+                    && state.get_capabilities(env, &caps) == JVMTI_ERROR_NONE
+                    && capabilities_contained(caps, required);
             }
+            recover = !healthy;
         }
-
-        if (!healthy) {
-            const bool was_healthy = state.healthy.exchange(false, std::memory_order_acq_rel);
-            if (was_healthy) {
-                HIMITSU_LOG_WARNING(
-                    "JvmtiGuard",
-                    "JVMTI 健康检查失败（原因=%s，env=%p，立即刷新=%s）",
-                    health_reason,
-                    env,
-                    refresh_allowed ? "是" : "否"
-                );
-            }
-            if (refresh_allowed) {
-                if (refresh_impl()) {
-                    HIMITSU_LOG_INFO("JvmtiGuard", "JVMTI 健康恢复成功");
-                } else {
-                    HIMITSU_LOG_WARNING("JvmtiGuard", "JVMTI 健康恢复尝试失败");
-                }
-            }
-        } else {
-            const bool was_healthy = state.healthy.exchange(true, std::memory_order_acq_rel);
-            if (!was_healthy) {
-                HIMITSU_LOG_INFO("JvmtiGuard", "JVMTI 健康状态已经恢复（env=%p，阶段=%d）", env, phase);
-            }
+        state.healthy.store(healthy, std::memory_order_release);
+        if (!healthy && !link_reported) {
+            HIMITSU_LOG_WARNING("JvmtiGuard", "JVMTI health unavailable (env=%p link=%d); unknown chains never trigger recreation", env, static_cast<int>(link));
+            link_reported = true;
+        } else if (healthy) link_reported = false;
+        if (recover && now >= state.next_refresh.load(std::memory_order_acquire) && refresh_impl()) {
+            link = EnvironmentLink::linked;
+            healthy = true;
+            link_reported = false;
         }
         if (++summary_tick >= 40) {
             summary_tick = 0;
-            HIMITSU_LOG_DEBUG(
-                "JvmtiGuard",
-                "JVMTI 健康摘要（健康=%s，env=%p，阶段=%d，代数=%llu）",
-                healthy ? "是" : "否",
-                current_env(),
-                phase,
-                state.generation.load(std::memory_order_acquire)
-            );
+            HIMITSU_LOG_DEBUG("JvmtiGuard", "JVMTI 健康摘要（健康=%s，env=%p，阶段=%d，代数=%llu）",
+                healthy ? "是" : "否", current_env(), phase, state.generation.load(std::memory_order_acquire));
         }
         Sleep(250);
     }
-    HIMITSU_LOG_INFO("JvmtiGuard", "JVMTI 健康监控线程已退出（线程ID=%lu）", GetCurrentThreadId());
+
     return 0;
 }
 }
@@ -702,9 +703,7 @@ bool initialize_jvmti_guard(JavaVM* vm, jvmtiEnv* env) {
         return same;
     }
 
-    state.vm = vm;
-    state.vm_get_env = vm->functions == nullptr ? nullptr : vm->functions->GetEnv;
-    state.vm_attach = vm->functions == nullptr ? nullptr : vm->functions->AttachCurrentThread;
+    cache_vm_calls(vm);
     state.env.store(env, std::memory_order_release);
     state.table = const_cast<jvmtiInterface_1_*>(env->functions);
     state.private_table = *env->functions;
@@ -889,10 +888,20 @@ bool start_jvmti_guard_monitor() {
         return true;
     }
     state.monitor_stop.store(false, std::memory_order_release);
-    state.monitor_thread = CreateThread(nullptr, 0, monitor_worker, nullptr, 0, nullptr);
+    state.monitor_thread = CreateThread(nullptr, 0, monitor_worker, nullptr, CREATE_SUSPENDED, nullptr);
     if (state.monitor_thread == nullptr) {
         HIMITSU_LOG_ERROR("JvmtiGuard", "创建 JVMTI 健康监控线程失败（错误码=%lu）", GetLastError());
         return false;
+    }
+    if(!himitsu::platform::windows::register_native_thread(state.monitor_thread)
+        || ResumeThread(state.monitor_thread)==static_cast<DWORD>(-1)) {
+        state.monitor_stop.store(true,std::memory_order_release);
+        ResumeThread(state.monitor_thread);
+        if(WaitForSingleObject(state.monitor_thread,5000)==WAIT_OBJECT_0) {
+            himitsu::platform::windows::unregister_native_thread(state.monitor_thread);
+            CloseHandle(state.monitor_thread);state.monitor_thread=nullptr;
+        }
+        HIMITSU_LOG_ERROR("JvmtiGuard","Monitor OS protection/launch failed");return false;
     }
     HIMITSU_LOG_INFO("JvmtiGuard", "JVMTI 健康监控线程创建完成（句柄=%p）", state.monitor_thread);
     return true;
@@ -906,27 +915,31 @@ bool trusted_jvmti_healthy() {
     return state.healthy.load(std::memory_order_acquire);
 }
 
-void shutdown_jvmti_guard() {
-    HIMITSU_LOG_INFO("JvmtiGuard", "开始关闭 JVMTI 守护（env=%p，监控线程=%p）", current_env(), state.monitor_thread);
-    state.monitor_stop.store(true, std::memory_order_release);
-    if (state.monitor_thread != nullptr) {
-        WaitForSingleObject(state.monitor_thread, 5000);
-        CloseHandle(state.monitor_thread);
-        state.monitor_thread = nullptr;
+void request_jvmti_guard_stop() {state.monitor_stop.store(true,std::memory_order_release);}
+bool shutdown_jvmti_guard(std::uint64_t deadline) {
+    request_jvmti_guard_stop();
+    if(state.monitor_thread) {
+        auto now=GetTickCount64();
+        if(WaitForSingleObject(state.monitor_thread,static_cast<DWORD>(now<deadline?deadline-now:0))!=WAIT_OBJECT_0) {
+            HIMITSU_LOG_ERROR("JvmtiGuard","Monitor did not exit; handle and JVM state retained");return false;
+        }
+        himitsu::platform::windows::unregister_native_thread(state.monitor_thread);
+        CloseHandle(state.monitor_thread);state.monitor_thread=nullptr;
     }
-    jvmtiEnv* env = current_env();
-    if (env == nullptr) return;
-    if (state.set_event_notification_mode != nullptr) {
-        state.set_event_notification_mode(env, JVMTI_DISABLE, JVMTI_EVENT_CLASS_FILE_LOAD_HOOK, nullptr);
-    }
-    if (state.set_event_callbacks != nullptr) {
-        jvmtiEventCallbacks callbacks{};
-        state.set_event_callbacks(env, &callbacks, sizeof(callbacks));
-    }
-    HIMITSU_LOG_INFO("JvmtiGuard", "JVMTI 守护关闭结束");
+    jvmtiEnv* env=current_env();if(!env) return true;
+    bool success=true;
+    if(state.set_event_notification_mode) success=state.set_event_notification_mode(env,JVMTI_DISABLE,JVMTI_EVENT_CLASS_FILE_LOAD_HOOK,nullptr)==JVMTI_ERROR_NONE;
+    if(state.set_event_callbacks) {jvmtiEventCallbacks callbacks{};success=state.set_event_callbacks(env,&callbacks,sizeof(callbacks))==JVMTI_ERROR_NONE && success;}
+    return success;
 }
-
-JavaVM* trusted_vm() { return state.vm; }
+jvmtiError trusted_current_thread(jthread* thread) {
+    jvmtiEnv* env=current_env();
+    auto function=state.private_table.GetCurrentThread;
+    return env && function && thread?function(env,thread):JVMTI_ERROR_NOT_AVAILABLE;
+}
+JavaVM* trusted_vm() {
+    AcquireSRWLockShared(&state.lock);JavaVM* vm=state.vm;ReleaseSRWLockShared(&state.lock);return vm;
+}
 
 jvmtiEnv* trusted_jvmti() {
     return current_env();

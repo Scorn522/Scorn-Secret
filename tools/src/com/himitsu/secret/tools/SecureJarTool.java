@@ -8,7 +8,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Set;
 import java.util.jar.JarEntry;
@@ -20,7 +19,8 @@ import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
 public final class SecureJarTool {
-    private static final byte[] MAGIC = {'H', 'S', 'P', '2'};
+    private static final byte[] MAGIC = {'H', 'S', 'P', '3'};
+    private static String packageVersion;
     private static final int SALT_LENGTH = 16;
     private static final int IV_LENGTH = 12;
     private static final String CLASS_ROOT = "com/himitsu/secret/";
@@ -37,11 +37,13 @@ public final class SecureJarTool {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length != 5) {
+        if (args.length != 6) {
             throw new IllegalArgumentException(
-                "Usage: SecureJarTool <input.jar> <output.jar> <mapping.txt> <outer-key> <class-key>"
+                "Usage: SecureJarTool <input.jar> <output.jar> <mapping.txt> <outer-key> <class-key> <package-version>"
             );
         }
+        packageVersion=args[5];
+        if(!packageVersion.matches("[A-Za-z0-9._+-]{1,96}")) throw new IllegalArgumentException("Invalid package version");
         secure(Path.of(args[0]), Path.of(args[1]), Path.of(args[2]), args[3], args[4]);
     }
 
@@ -90,7 +92,7 @@ public final class SecureJarTool {
                 }
 
                 byte[] bytes = readAll(jar);
-                if (name.endsWith(".class") && !passthrough.contains(name)) {
+                if (name.endsWith(".class") && !name.equals("module-info.class") && !passthrough.contains(name)) {
                     String encryptedName = name.substring(0, name.length() - ".class".length()) + ".bin";
                     JarEntry payloadEntry = new JarEntry(encryptedName);
                     payloadEntry.setTime(0L);
@@ -141,7 +143,8 @@ public final class SecureJarTool {
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
         cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, iv));
         cipher.updateAAD(header);
-        byte[] ciphertext = cipher.doFinal(data);
+        byte[] ciphertext;
+        try { ciphertext=cipher.doFinal(data); } finally { java.util.Arrays.fill(key,(byte)0); }
         ByteArrayOutputStream output = new ByteArrayOutputStream(header.length + ciphertext.length);
         output.write(header);
         output.write(ciphertext);
@@ -165,17 +168,20 @@ public final class SecureJarTool {
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
         cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, iv));
         cipher.updateAAD(java.util.Arrays.copyOfRange(data, 0, dataOffset));
-        return cipher.doFinal(ciphertext);
+        try { return cipher.doFinal(ciphertext); }
+        finally { java.util.Arrays.fill(key,(byte)0); }
     }
 
     private static byte[] deriveKey(String secret, String purpose, byte[] salt) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        digest.update(secret.getBytes(StandardCharsets.UTF_8));
-        digest.update((byte)0);
-        digest.update(purpose.getBytes(StandardCharsets.US_ASCII));
-        digest.update((byte)0);
-        digest.update(salt);
-        return digest.digest();
+        // RFC 5869, one SHA-256 output block. Purpose and release are domain-separated.
+        javax.crypto.Mac mac=javax.crypto.Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(salt,"HmacSHA256"));
+        byte[] input=secret.getBytes(StandardCharsets.UTF_8),prk=mac.doFinal(input);
+        try {
+            mac.init(new SecretKeySpec(prk,"HmacSHA256"));
+            mac.update(("Secret/HSP3/"+purpose+"/"+packageVersion).getBytes(StandardCharsets.US_ASCII));
+            return mac.doFinal(new byte[]{1});
+        } finally { java.util.Arrays.fill(input,(byte)0);java.util.Arrays.fill(prk,(byte)0); }
     }
 
     private static byte[] header(byte[] salt, byte[] iv) throws IOException {
@@ -203,7 +209,7 @@ public final class SecureJarTool {
                 if (entry.isDirectory()) {
                     throw new IOException("Secured JAR must not contain directory entries: " + name);
                 }
-                if (name.endsWith(".class") && !passthrough.contains(name)) {
+                if (name.endsWith(".class") && !name.equals("module-info.class") && !passthrough.contains(name)) {
                     throw new IOException("Payload class remained plaintext: " + name);
                 }
                 if (name.equals(PAYLOAD_ENTRY)) {
