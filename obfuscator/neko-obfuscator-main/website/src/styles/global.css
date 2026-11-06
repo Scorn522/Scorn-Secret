@@ -1,0 +1,149 @@
+/* ── Fonts ── */
+@import '@fontsource/inter/latin-400.css';
+@import '@fontsource/inter/latin-500.css';
+@import '@fontsource/inter/latin-600.css';
+@import '@fontsource/inter/latin-700.css';
+@import '@fontsource/jetbrains-mono/latin-400.css';
+@import '@fontsource/jetbrains-mono/latin-500.css';
+
+/* ── Theme tokens ── */
+:root {
+  /* Cold gray + steel blue palette — light */
+  --bg-primary: #f2f3f5;
+  --bg-secondary: #e8eaed;
+  --bg-card: rgba(255, 255, 255, 0.72);
+  --bg-card-hover: rgba(255, 255, 255, 0.88);
+  --bg-glass: rgba(255, 255, 255, 0.48);
+  --text-primary: #1a1c1e;
+  --text-secondary: #5f6368;
+  --text-tertiary: #8a8f94;
+  --accent: #5b7a9a;
+  --accent-subtle: rgba(91, 122, 154, 0.12);
+  --accent-glow: rgba(91, 122, 154, 0.24);
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.12);
+  --divider: rgba(0, 0, 0, 0.06);
+
+  /* Layout */
+  --max-width: 1200px;
+  --nav-height: 56px;
+
+  /* Typography */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+
+  /* Easing */
+  --ease-spring: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out-expo: cubic-bezier(0.87, 0, 0.13, 1);
+}
+
+/* ── Dark theme ── */
+[data-theme='dark'] {
+  --bg-primary: #1a1c1e;
+  --bg-secondary: #202326;
+  --bg-card: rgba(40, 44, 48, 0.72);
+  --bg-card-hover: rgba(40, 44, 48, 0.88);
+  --bg-glass: rgba(40, 44, 48, 0.48);
+  --text-primary: #e8eaed;
+  --text-secondary: #9aa0a6;
+  --text-tertiary: #6b7280;
+  --accent: #7ba4c2;
+  --accent-subtle: rgba(123, 164, 194, 0.12);
+  --accent-glow: rgba(123, 164, 194, 0.18);
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.12);
+  --divider: rgba(255, 255, 255, 0.06);
+}
+
+/* ── Reset & base ── */
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.6;
+  overflow-x: hidden;
+}
+
+/* Theme transitions only after page is ready — prevents flash on load */
+.theme-ready body {
+  transition: background-color 0.4s var(--ease-spring), color 0.4s var(--ease-spring);
+}
+
+.theme-ready .nav-bar {
+  transition: background 0.4s var(--ease-spring), border-color 0.4s var(--ease-spring);
+}
+
+.theme-ready .native-section {
+  transition: background 0.4s var(--ease-spring);
+}
+
+/* ── Typography ── */
+h1, h2, h3, h4 {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+p {
+  color: var(--text-secondary);
+}
+
+code, pre {
+  font-family: var(--font-mono);
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+  transition: opacity 0.2s ease;
+}
+
+a:hover {
+  opacity: 0.8;
+}
+
+/* ── Utility ── */
+.container {
+  width: 100%;
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+.section-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 12px;
+}
+
+.section-title {
+  font-size: clamp(2rem, 4vw, 3.2rem);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+  margin-bottom: 16px;
+}
+
+.section-subtitle {
+  font-size: 1.1rem;
+  color: var(--text-secondary);
+  max-width: 560px;
+  line-height: 1.6;
+}

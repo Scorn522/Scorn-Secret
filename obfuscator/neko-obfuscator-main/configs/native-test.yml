@@ -1,0 +1,16 @@
+version: 1
+
+native:
+  enabled: true
+  targets:
+    - LINUX_X64
+  methods:
+    - "**/*"
+  excludePatterns: []
+  includeAnnotated: true
+  skipOnError: true
+  outputPrefix: "neko_impl_"
+  resourceEncryption: false
+
+keys:
+  masterSeed: 12345

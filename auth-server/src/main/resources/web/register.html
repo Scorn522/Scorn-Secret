@@ -1,0 +1,31 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Secret - 注册</title>
+  <style>
+    *{box-sizing:border-box}html,body{margin:0;min-height:100%;font-family:"Microsoft YaHei",Arial,sans-serif;color:#40464d}body{min-height:100vh;display:grid;place-items:center;background:#f3f4f5;padding:24px}.card{width:480px;max-width:100%;padding:42px 36px 34px;background:#fff;border-radius:16px;box-shadow:0 10px 32px rgba(0,0,0,.1)}h1{margin:0 0 26px;text-align:center;font-size:36px;font-weight:400;letter-spacing:3px;color:#373d43}.form{display:grid;gap:12px}.field{height:48px;display:flex;align-items:center;border:1px solid #e5e7e9;background:#fff;transition:.2s}.field:focus-within{border-color:#35c5bb;box-shadow:0 0 0 3px rgba(53,197,187,.1)}.icon{width:45px;text-align:center;color:#c8cccf;font-size:17px}.field input{height:100%;min-width:0;flex:1;border:0;outline:0;padding:0 14px 0 0;color:#4b5258;font-size:15px;background:transparent}.field input::placeholder{color:#b8bdc1}.toggle{width:54px;height:100%;border:0;background:transparent;color:#aeb4b8;cursor:pointer}.submit{height:52px;margin-top:2px;border:0;background:#35c5bb;color:#fff;font-size:17px;cursor:pointer;transition:.2s}.submit:hover{background:#2eb7ae}.submit:disabled{opacity:.6;cursor:wait}.status{display:none;padding:11px 13px;font-size:13px;line-height:1.5}.status.show{display:block}.status.error{color:#d75461;background:#fff1f2}.status.ok{color:#208a72;background:#ebfaf6}.line{height:1px;background:#eef0f1;margin:25px 16px 22px}.footer{text-align:center;color:#a7adb1;font-size:12px}.footer b{color:#35c5bb;font-weight:500}@media(max-width:540px){body{padding:14px}.card{padding:35px 22px 28px;border-radius:12px}h1{font-size:30px}}
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>SIGN UP</h1>
+    <form id="registerForm" class="form">
+      <label class="field"><span class="icon">●</span><input id="username" autocomplete="username" maxlength="32" placeholder="请输入用户名" required></label>
+      <label class="field"><span class="icon">◆</span><input id="password" type="password" autocomplete="new-password" placeholder="请输入密码" required><button id="togglePassword" class="toggle" type="button">显示</button></label>
+      <label class="field"><span class="icon">⚿</span><input id="cardKey" autocomplete="off" maxlength="64" placeholder="请输入卡密" required></label>
+      <div id="status" class="status"></div>
+      <button id="submitButton" class="submit" type="submit">立即注册</button>
+    </form>
+    <div class="line"></div>
+    <div class="footer">Copyright © 2026 <b>Secret</b></div>
+  </main>
+  <script>
+    const form=document.getElementById('registerForm'),button=document.getElementById('submitButton'),statusBox=document.getElementById('status'),password=document.getElementById('password'),toggle=document.getElementById('togglePassword');
+    toggle.addEventListener('click',()=>{const show=password.type==='password';password.type=show?'text':'password';toggle.textContent=show?'隐藏':'显示'});
+    const showStatus=(message,ok)=>{statusBox.className='status show '+(ok?'ok':'error');statusBox.textContent=message};
+    form.addEventListener('submit',async event=>{event.preventDefault();statusBox.className='status';button.disabled=true;button.textContent='正在注册…';try{const response=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:document.getElementById('username').value.trim(),password:password.value,card_key:document.getElementById('cardKey').value.trim()})});const data=await response.json();if(!response.ok||!data.ok)throw new Error(data.message||'注册失败');showStatus(data.message,true);form.reset();password.type='password';toggle.textContent='显示'}catch(error){showStatus(error.message||'连接失败，请稍后重试',false)}finally{button.disabled=false;button.textContent='立即注册'}});
+  </script>
+</body>
+</html>

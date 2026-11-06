@@ -1,0 +1,7 @@
+version: 1
+
+native:
+  enabled: false
+
+keys:
+  masterSeed: 12345678

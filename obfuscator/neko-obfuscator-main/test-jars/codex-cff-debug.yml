@@ -1,0 +1,16 @@
+version: 1
+
+transforms:
+  renamer: { enabled: true, packagePrefix: a/ }
+  keyDispatch: { enabled: true }
+  methodParameterObfuscation: { enabled: true }
+  controlFlowFlattening: { enabled: true, intensity: 1.0 }
+  invokeDynamic: { enabled: false }
+  constantObfuscation: { enabled: false }
+  stringObfuscation: { enabled: false }
+
+native:
+  enabled: false
+
+keys:
+  masterSeed: auto

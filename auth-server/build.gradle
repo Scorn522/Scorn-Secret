@@ -1,0 +1,37 @@
+plugins {
+    id 'application'
+}
+
+group = 'com.himitsu.secret'
+version = '1.0.0'
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+dependencies {
+    implementation 'io.netty:netty-all:4.1.115.Final'
+    implementation 'org.xerial:sqlite-jdbc:3.47.1.0'
+    implementation 'org.bouncycastle:bcprov-jdk18on:1.79'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.2'
+    implementation 'org.slf4j:slf4j-simple:2.0.16'
+}
+
+application {
+    mainClass = 'com.himitsu.auth.AuthServerMain'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 17
+}
+
+tasks.named('run').configure {
+    standardInput = System.in
+}

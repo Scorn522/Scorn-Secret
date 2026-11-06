@@ -1,0 +1,181 @@
+package com.himitsu.secret.bridge;
+
+import java.net.URLClassLoader;
+import java.nio.file.Path;
+import java.time.Duration;
+
+/** Explicit production-DLL startup check in a disposable JVM; never starts Forge or a world. */
+public final class NativeStartupCheck {
+    private static volatile boolean nestedDumpRequested;
+    private static volatile byte[] nestedDump;
+    private static volatile int heartbeatCallbacks;
+    private static void check(boolean condition,String message) {
+        if(!condition)throw new AssertionError(message);
+    }
+    private static void verifySourceShield(Path archive) throws Exception {
+        int decoded=0;
+        try(var zip=new java.util.zip.ZipFile(archive.toFile())) {
+            byte[] encrypted;
+            try(var stream=zip.getInputStream(zip.getEntry("himitsu.jar"))) { encrypted=stream.readAllBytes(); }
+            byte[] payload=(byte[])SecretNative.invokeChecked("DecryptPayloadJar",encrypted);
+            try(var input=new java.util.jar.JarInputStream(new java.io.ByteArrayInputStream(payload))) {
+                for(var entry=input.getNextJarEntry();entry!=null;entry=input.getNextJarEntry()) {
+                    if(!entry.getName().endsWith(".bin"))continue;
+                    byte[] bytes=(byte[])SecretNative.invokeChecked("DecryptPayloadClass",input.readAllBytes());
+                    check(new org.objectweb.asm.ClassReader(bytes).getClassName().startsWith("com/himitsu/secret/"),"Unexpected authenticated class");
+                    decoded++;
+                }
+            }
+            byte[] original;
+            try(var input=zip.getInputStream(zip.getEntry("com/himitsu/secret/bridge/EarlyBootstrapService.class"))) { original=input.readAllBytes(); }
+            var node=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(original).accept(node,0);
+            boolean changed=false;
+            for(var method:node.methods) for(var instruction:method.instructions) {
+                if(instruction instanceof org.objectweb.asm.tree.LdcInsnNode ldc && "secret-bootstrap".equals(ldc.cst)) {
+                    ldc.cst="changed-by-check";changed=true;
+                }
+            }
+            check(changed,"Source mutation fixture did not change");
+            var writer=new org.objectweb.asm.ClassWriter(0);node.accept(writer);
+            check(Boolean.TRUE.equals(SecretNative.invokeChecked("RedefineClass",EarlyBootstrapService.class,writer.toByteArray())),"Own redefine failed");
+            check(new EarlyBootstrapService().name().equals("secret-bootstrap"),"Own JAR source did not heal rewritten class");
+            var callback=NativeStartupCheck.class.getMethod("ownedTransform",ClassLoader.class,String.class,Class.class,java.security.ProtectionDomain.class,byte[].class);
+            SecretNative.invokeChecked("ClassLoadHook",NativeStartupCheck.class,callback);
+            try {
+                SecretNative.invokeChecked("RedefineClass",EarlyBootstrapService.class,writer.toByteArray());
+                check(new EarlyBootstrapService().name().equals("authorized-hook"),"Legitimate internal hook was removed");
+                nestedDumpRequested=true;
+                byte[] observed=(byte[])SecretNative.invokeChecked("DumpClass",EarlyBootstrapService.class);
+                check(new org.objectweb.asm.ClassReader(observed).getClassName().endsWith("EarlyBootstrapService"),"Outer dump capture was replaced");
+                check(nestedDump!=null && new org.objectweb.asm.ClassReader(nestedDump).getClassName().endsWith("SecretNative"),"Nested dump capture failed");
+                int before=heartbeatCallbacks;
+                Thread.sleep(2500);
+                check(heartbeatCallbacks==before,"Background monitor still retransforms SecretNative");
+            } finally { SecretNative.invokeChecked("ClassLoadHook",null,null); }
+            SecretNative.invokeChecked("RedefineClass",EarlyBootstrapService.class,writer.toByteArray());
+            check(new EarlyBootstrapService().name().equals("secret-bootstrap"),"Disabling Java callback disabled native source shield");
+        }
+        check(decoded>0,"Authenticated payload was not checked");
+        byte[] first=outsider(3),second=outsider(7);
+        ClassLoader loader=new ClassLoader() {};
+        Class<?> other=(Class<?>)SecretNative.invokeChecked("DefineClass","external/check/Ordinary",loader,first);
+        check((Integer)other.getMethod("value").invoke(null)==3,"Ordinary class failed to load");
+        check(Boolean.TRUE.equals(SecretNative.invokeChecked("RedefineClass",other,second)),"Ordinary redefine was blocked");
+        check((Integer)other.getMethod("value").invoke(null)==7,"Source shield changed an unrelated class");
+        System.out.println("SOURCE_SHIELD_PASS authenticated_classes="+decoded+" jar_self_heal internal_hook_preserved unregister_still_protected unrelated_class_preserved nested_dump no_background_retransform");
+    }
+    public static byte[] ownedTransform(ClassLoader loader,String name,Class<?> type,java.security.ProtectionDomain domain,byte[] input) {
+        if(name.equals("com/himitsu/secret/bridge/SecretNative"))heartbeatCallbacks++;
+        if(!name.equals("com/himitsu/secret/bridge/EarlyBootstrapService"))return null;
+        if(nestedDumpRequested) {
+            nestedDumpRequested=false;
+            nestedDump=(byte[])SecretNative.invokeChecked("DumpClass",SecretNative.class);
+        }
+        var node=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(input).accept(node,0);
+        boolean clean=false;
+        for(var method:node.methods)for(var instruction:method.instructions) {
+            if(instruction instanceof org.objectweb.asm.tree.LdcInsnNode ldc && "secret-bootstrap".equals(ldc.cst)) {
+                clean=true;ldc.cst="authorized-hook";
+            }
+        }
+        check(clean,"Internal transformer received untrusted bytes");
+        var writer=new org.objectweb.asm.ClassWriter(0);node.accept(writer);return writer.toByteArray();
+    }
+    private static byte[] outsider(int value) {
+        var writer=new org.objectweb.asm.ClassWriter(0);
+        writer.visit(61,org.objectweb.asm.Opcodes.ACC_PUBLIC,"external/check/Ordinary",null,"java/lang/Object",null);
+        var method=writer.visitMethod(org.objectweb.asm.Opcodes.ACC_PUBLIC|org.objectweb.asm.Opcodes.ACC_STATIC,"value","()I",null,null);
+        method.visitCode();method.visitIntInsn(org.objectweb.asm.Opcodes.BIPUSH,value);method.visitInsn(org.objectweb.asm.Opcodes.IRETURN);
+        method.visitMaxs(1,0);method.visitEnd();writer.visitEnd();return writer.toByteArray();
+    }
+    @SuppressWarnings({"deprecation", "removal"})
+    private static void verifyThreadGuards() throws Exception {
+        var running=new java.util.concurrent.atomic.AtomicBoolean(true);
+        var ticks=new java.util.concurrent.atomic.AtomicLong();
+        var started=new java.util.concurrent.CountDownLatch(1);
+        Thread worker=new Thread(() -> {
+            started.countDown();
+            while(running.get()) {
+                ticks.incrementAndGet();
+                java.util.concurrent.locks.LockSupport.parkNanos(1_000_000L);
+            }
+        },"Secret-check-owned-worker");
+        worker.setDaemon(true);worker.start();
+        check(started.await(2,java.util.concurrent.TimeUnit.SECONDS),"Thread fixture did not start");
+        try {
+            check(Thread.getAllStackTraces().containsKey(worker),"Ordinary thread was hidden");
+            worker.suspend();
+            try {
+                long parked=ticks.get();Thread.sleep(50);
+                check(ticks.get()==parked,"Ordinary suspend was blocked");
+            } finally { worker.resume(); }
+            SecretNative.invokeChecked("ProtectThread",worker);
+            check(!Thread.getAllStackTraces().containsKey(worker),"Protected thread remained enumerable");
+            long before=ticks.get();worker.suspend();
+            try {
+                for(int i=0;i<100&&ticks.get()<=before;i++)Thread.sleep(10);
+                check(ticks.get()>before,"Protected thread was suspended");
+            } finally { worker.resume(); }
+            worker.stop();Thread.sleep(30);
+            check(worker.isAlive(),"Protected thread was stopped");
+            SecretNative.invokeChecked("UnprotectThread",worker);
+            check(Thread.getAllStackTraces().containsKey(worker),"Unprotected thread stayed hidden");
+            worker.stop();worker.join(2000);
+            check(!worker.isAlive(),"Ordinary stop was blocked");
+        } finally {
+            SecretNative.invokeChecked("UnprotectThread",worker);
+            running.set(false);worker.resume();worker.join(2000);
+        }
+        System.out.println("THREAD_GUARD_PASS enumerate protected_suspend_stop_refused ordinary_suspend_stop_preserved");
+    }
+    private static void shutdownWhileEnumerating() throws Exception {
+        var running=new java.util.concurrent.atomic.AtomicBoolean(true);
+        var failure=new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        var started=new java.util.concurrent.CountDownLatch(1);
+        Thread reader=new Thread(() -> {
+            started.countDown();
+            try { while(running.get()) { Thread.getAllStackTraces(); Thread.yield(); } }
+            catch(Throwable error) { failure.set(error); }
+        },"Secret-check-exit-enumerator");
+        reader.setDaemon(true);reader.start();started.await();
+        try { SecretNative.shutdown(); }
+        finally { running.set(false);reader.join(3000); }
+        check(!reader.isAlive()&&failure.get()==null,"Concurrent shutdown/enumeration failed: "+failure.get());
+        check(Thread.getAllStackTraces().containsKey(Thread.currentThread()),"Enumeration failed after shutdown");
+        System.out.println("THREAD_GUARD_EXIT_PASS concurrent_enumeration late_calls_safe");
+    }
+    public static void main(String[] args) throws Exception {
+        Path archive=Path.of(args[0]).toAbsolutePath(),directory=Path.of(args[1]).toAbsolutePath();
+        try(URLClassLoader service=new URLClassLoader(new java.net.URL[]{archive.toUri().toURL()},NativeStartupCheck.class.getClassLoader()) {
+            @Override protected Class<?> loadClass(String name,boolean resolve) throws ClassNotFoundException {
+                if(!name.equals("com.himitsu.secret.bridge.SecretNative"))return super.loadClass(name,resolve);
+                synchronized(getClassLoadingLock(name)) {
+                    Class<?> value=findLoadedClass(name);
+                    if(value==null)value=findClass(name);
+                    if(resolve)resolveClass(value);return value;
+                }
+            }
+        }) {
+            Class<?> early=service.loadClass("com.himitsu.secret.bridge.SecretNative");
+            early.getMethod("loadEarly",Path.class).invoke(null,directory);
+            var published=early.getDeclaredField("registeredBridge");published.setAccessible(true);
+            check(published.get(null)==null,"Service layer received game bridge");
+            try {
+                SecretNative.load(directory,Duration.ofSeconds(10));
+                check(SecretNative.isLoaded(),"Production native runtime not ready");
+                var field=SecretNative.class.getDeclaredField("registeredBridge");field.setAccessible(true);
+                Class<?> bridge=(Class<?>)field.get(null);
+                check(bridge!=null&&bridge!=Object.class,"Invalid bridge identity");
+                check(bridge.getClassLoader()==SecretNative.class.getClassLoader(),"Wrong loader owns game bridge");
+                check(published.get(null)==null,"Game bridge leaked into service copy");
+                var count=BridgeBindingCheck.class.getDeclaredField("transformed");count.setAccessible(true);
+                check(count.getInt(null)==0,"External class callback survived early isolation");
+                verifySourceShield(archive);
+                verifyThreadGuards();
+                System.out.println("NATIVE_STARTUP_PASS two_loaders source_shield external_agent_isolated bridge="+bridge.getName());
+            } finally { shutdownWhileEnumerating(); }
+        }
+        check(!SecretNative.isLoaded(),"Production native shutdown incomplete");
+        System.out.println("NATIVE_STARTUP_EXIT_PASS NO_GAME");
+    }
+}

@@ -1,0 +1,297 @@
+---
+const points = [
+  {
+    title: 'HotSpot entry patching',
+    desc: 'During JNI_OnLoad, Neko patches vtable/itable entries in HotSpot\'s Method structures, redirecting execution to compiled native code without JNI overhead.',
+  },
+  {
+    title: 'Zero JNI boundaries',
+    desc: 'Traditional native obfuscators cross JNI on every call — marshalling, handle management, JNIEnv lookups. Neko bypasses all of it.',
+  },
+  {
+    title: 'Indistinguishable performance',
+    desc: 'Native execution within measurement noise of raw JVM speeds — and faster in compute-heavy workloads. No soft fallback, strict barriers or abort.',
+  },
+  {
+    title: 'JDK 21+ multi-platform',
+    desc: 'Fresh runtime validation for each target JDK, platform, and GC mode. Compiled via Zig for Linux x64, with cross-platform support expanding.',
+  },
+];
+---
+
+<section class="native-section" id="native">
+  <div class="container">
+    <div class="section-label" data-animate>Native Translation</div>
+    <h2 class="section-title" data-animate>Not JNI. Not JVMTI.<br />HotSpot.</h2>
+    <p class="section-subtitle" data-animate>
+      Every other native obfuscator pays the JNI tax. Neko patches HotSpot directly,
+      achieving native execution speeds within measurement noise — and sometimes
+      faster than — raw, un-obfuscated code.
+    </p>
+
+    <div class="native-grid">
+      {points.map((p, i) => (
+        <div class="nat-item" data-animate>
+          <span class="nat-num">{String(i + 1).padStart(2, '0')}</span>
+          <div class="nat-text">
+            <h3 class="nat-title">{p.title}</h3>
+            <p class="nat-desc">{p.desc}</p>
+          </div>
+        </div>
+      ))}
+    </div>
+
+    <div class="native-compare" data-animate>
+      <div class="cmp-path cmp-path--jni">
+        <span class="cmp-path-label">Traditional JNI Path</span>
+        <div class="cmp-steps">
+          <span class="cmp-step">Java</span>
+          <span class="cmp-arr">&rarr;</span>
+          <span class="cmp-step">JNI stub</span>
+          <span class="cmp-arr">&rarr;</span>
+          <span class="cmp-step">Marshall args</span>
+          <span class="cmp-arr">&rarr;</span>
+          <span class="cmp-step">Native exec</span>
+          <span class="cmp-arr">&rarr;</span>
+          <span class="cmp-step">Unbox result</span>
+          <span class="cmp-arr">&rarr;</span>
+          <span class="cmp-step">Java</span>
+        </div>
+      </div>
+
+      <div class="cmp-vs">vs</div>
+
+      <div class="cmp-path cmp-path--neko">
+        <span class="cmp-path-label">Neko HotSpot Path</span>
+        <div class="cmp-steps">
+          <span class="cmp-step">Java</span>
+          <span class="cmp-arr">&rarr;</span>
+          <span class="cmp-step">Patched vtable</span>
+          <span class="cmp-arr">&rarr;</span>
+          <span class="cmp-step cmp-step--accent">Direct native call</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+  import { gsap } from 'gsap';
+  import { ScrollTrigger } from 'gsap/ScrollTrigger';
+
+  gsap.registerPlugin(ScrollTrigger);
+
+  document.addEventListener('astro:page-load', () => {
+    gsap.fromTo('.native-section .section-label, .native-section .section-title, .native-section .section-subtitle', {
+      y: 36,
+      opacity: 0,
+    }, {
+      y: 0,
+      opacity: 1,
+      duration: 0.8,
+      stagger: 0.1,
+      ease: 'power3.out',
+      scrollTrigger: {
+        trigger: '.native-section',
+        start: 'top 80%',
+        toggleActions: 'play none none none',
+      },
+    });
+
+    gsap.fromTo('.nat-item', {
+      y: 36,
+      opacity: 0,
+    }, {
+      y: 0,
+      opacity: 1,
+      duration: 0.6,
+      stagger: 0.08,
+      ease: 'power3.out',
+      scrollTrigger: {
+        trigger: '.native-grid',
+        start: 'top 78%',
+        toggleActions: 'play none none none',
+      },
+    });
+
+    gsap.fromTo('.native-compare', {
+      y: 40,
+      opacity: 0,
+    }, {
+      y: 0,
+      opacity: 1,
+      duration: 0.8,
+      ease: 'power3.out',
+      scrollTrigger: {
+        trigger: '.native-compare',
+        start: 'top 82%',
+        toggleActions: 'play none none none',
+      },
+    });
+  });
+</script>
+
+<style>
+  .native-section {
+    background: var(--bg-secondary);
+  }
+
+  /* ── 4-point grid — matches Features layout ── */
+  .native-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    column-gap: 28px;
+    row-gap: 0;
+    margin-top: 48px;
+    border-top: 1px solid var(--divider);
+  }
+
+  .nat-item {
+    display: flex;
+    gap: 14px;
+    padding: 24px 0;
+    border-bottom: 1px solid var(--divider);
+  }
+
+  .nat-item:nth-child(odd) {
+    border-right: 1px solid var(--divider);
+    padding-right: 28px;
+  }
+
+  .nat-item:nth-child(even) {
+    padding-left: 28px;
+  }
+
+  .nat-num {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-weight: 600;
+    color: var(--accent);
+    opacity: 0.7;
+    padding-top: 3px;
+    flex-shrink: 0;
+  }
+
+  .nat-text {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .nat-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  .nat-desc {
+    font-size: 0.85rem;
+    line-height: 1.55;
+    color: var(--text-tertiary);
+  }
+
+  /* ── Comparison ── */
+  .native-compare {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    margin-top: 56px;
+    border: 1px solid var(--divider);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  .cmp-path {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 28px;
+  }
+
+  .cmp-path--jni {
+    background: transparent;
+  }
+
+  .cmp-path--neko {
+    background: var(--accent-subtle);
+  }
+
+  .cmp-path-label {
+    font-weight: 600;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+  }
+
+  .cmp-steps {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .cmp-step {
+    font-size: 0.72rem;
+    font-family: var(--font-mono);
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+
+  .cmp-step--accent {
+    color: var(--accent);
+    font-weight: 500;
+  }
+
+  .cmp-arr {
+    font-size: 0.65rem;
+    color: var(--text-tertiary);
+    user-select: none;
+  }
+
+  .cmp-vs {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 28px 0;
+    writing-mode: vertical-lr;
+    border-left: 1px solid var(--divider);
+    border-right: 1px solid var(--divider);
+    flex-shrink: 0;
+    min-width: 36px;
+  }
+
+  @media (max-width: 768px) {
+    .native-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .nat-item:nth-child(odd) {
+      border-right: none;
+      padding-right: 0;
+    }
+
+    .nat-item:nth-child(even) {
+      padding-left: 0;
+    }
+
+    .native-compare {
+      flex-direction: column;
+    }
+
+    .cmp-vs {
+      writing-mode: horizontal-tb;
+      padding: 10px 0;
+      border-left: none;
+      border-right: none;
+      border-top: 1px solid var(--divider);
+      border-bottom: 1px solid var(--divider);
+      min-width: auto;
+    }
+  }
+</style>

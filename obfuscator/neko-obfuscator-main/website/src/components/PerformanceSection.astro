@@ -1,0 +1,236 @@
+---
+---
+
+<section class="perf-section" id="performance">
+  <div class="container">
+    <div class="section-label" data-animate>Performance</div>
+    <h2 class="section-title" data-animate>Near-zero overhead.<br />Sometimes faster than raw.</h2>
+    <p class="section-subtitle" data-animate>
+      By bypassing JNI entirely and compiling to native via Zig, Neko eliminates the
+      marshalling tax that cripples traditional native obfuscators. In compute-heavy
+      workloads, the native code can even outperform the JVM JIT.
+    </p>
+
+    <div class="perf-chart" data-animate>
+      <!-- Calc: Neko FASTER than raw -->
+      <div class="perf-bar-group">
+        <div class="perf-bar-label">
+          <span class="perf-metric">Calc benchmark</span>
+          <span class="perf-op">Static-only, arithmetic-intensive loop</span>
+        </div>
+        <div class="perf-bars">
+          <div class="perf-bar perf-bar--base" style="--h: 120px">
+            <span class="perf-bar-value">9–12ms</span>
+            <span class="perf-bar-tag">Raw JVM</span>
+          </div>
+          <div class="perf-bar perf-bar--win" style="--h: 48px">
+            <span class="perf-bar-value">2–3ms</span>
+            <span class="perf-bar-tag">Neko Native</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Matrix: close to raw -->
+      <div class="perf-bar-group">
+        <div class="perf-bar-label">
+          <span class="perf-metric">Matrix multiplication</span>
+          <span class="perf-op">4096 × 4096, double-precision</span>
+        </div>
+        <div class="perf-bars">
+          <div class="perf-bar perf-bar--base" style="--h: 52px">
+            <span class="perf-bar-value">3–4ms</span>
+            <span class="perf-bar-tag">Raw JVM</span>
+          </div>
+          <div class="perf-bar perf-bar--neko" style="--h: 100px">
+            <span class="perf-bar-value">9–10ms</span>
+            <span class="perf-bar-tag">Neko Native</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- JNI reference: catastrophic -->
+      <div class="perf-bar-group">
+        <div class="perf-bar-label">
+          <span class="perf-metric">JNI-based obfuscator (reference)</span>
+          <span class="perf-op">Equivalent workload, standard JNI boundaries</span>
+        </div>
+        <div class="perf-bars">
+          <div class="perf-bar perf-bar--base" style="--h: 52px">
+            <span class="perf-bar-value">3–4ms</span>
+            <span class="perf-bar-tag">Raw JVM</span>
+          </div>
+          <div class="perf-bar perf-bar--bad" style="--h: 200px">
+            <span class="perf-bar-value">150ms+</span>
+            <span class="perf-bar-tag">JNI Obfuscator</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <p class="perf-note" data-animate>
+      * Benchmarks run on Linux x64, JDK 21+, G1 GC. Neko native compiled via Zig with
+      <code>-march=x86_64_v3</code>. JNI reference values are typical for standard
+      JNI-bound native obfuscators — the overhead comes from argument marshalling,
+      JNIEnv lookups, and object handle management on every call boundary.
+    </p>
+  </div>
+</section>
+
+<script>
+  import { gsap } from 'gsap';
+  import { ScrollTrigger } from 'gsap/ScrollTrigger';
+
+  gsap.registerPlugin(ScrollTrigger);
+
+  document.addEventListener('astro:page-load', () => {
+    gsap.fromTo('.perf-section [data-animate]', {
+      y: 48,
+      opacity: 0,
+    }, {
+      y: 0,
+      opacity: 1,
+      duration: 0.8,
+      stagger: 0.1,
+      ease: 'power3.out',
+      scrollTrigger: {
+        trigger: '.perf-section',
+        start: 'top 75%',
+        toggleActions: 'play none none none',
+      },
+    });
+
+    // Animate bars: tween from 0 to target height
+    gsap.fromTo('.perf-bar', {
+      height: 0,
+      opacity: 0,
+    }, {
+      height: (i, el) => el.style.getPropertyValue('--h'),
+      opacity: 1,
+      duration: 0.9,
+      stagger: 0.08,
+      ease: 'power4.out',
+      scrollTrigger: {
+        trigger: '.perf-chart',
+        start: 'top 80%',
+        toggleActions: 'play none none none',
+      },
+    });
+  });
+</script>
+
+<style>
+  .perf-chart {
+    display: flex;
+    flex-direction: column;
+    gap: 36px;
+    margin-top: 48px;
+  }
+
+  .perf-bar-group {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .perf-bar-label {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .perf-metric {
+    font-weight: 600;
+    font-size: 0.92rem;
+  }
+
+  .perf-op {
+    font-size: 0.76rem;
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+  }
+
+  .perf-bars {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 24px;
+    height: 240px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--divider);
+  }
+
+  .perf-bar {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    width: 140px;
+    border-radius: 8px 8px 0 0;
+    position: relative;
+    padding-top: 12px;
+    height: var(--h);
+    min-height: 32px;
+  }
+
+  .perf-bar--base {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-strong);
+  }
+
+  .perf-bar--neko {
+    background: var(--accent-subtle);
+    border: 1px solid var(--accent);
+  }
+
+  .perf-bar--win {
+    background: rgba(34, 197, 94, 0.08);
+    border: 1px solid rgba(34, 197, 94, 0.35);
+  }
+
+  .perf-bar--bad {
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+  }
+
+  .perf-bar-value {
+    font-weight: 600;
+    font-size: 0.95rem;
+    font-family: var(--font-mono);
+    position: absolute;
+    top: -26px;
+    white-space: nowrap;
+  }
+
+  .perf-bar--base .perf-bar-value { color: var(--text-secondary); }
+  .perf-bar--neko .perf-bar-value { color: var(--accent); }
+  .perf-bar--win .perf-bar-value { color: #16a34a; }
+  .perf-bar--bad .perf-bar-value { color: #ef4444; }
+
+  .perf-bar-tag {
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    margin-top: auto;
+    padding-bottom: 6px;
+  }
+
+  .perf-note {
+    margin-top: 28px;
+    font-size: 0.75rem;
+    color: var(--text-tertiary);
+    line-height: 1.55;
+  }
+
+  .perf-note code {
+    font-size: 0.72rem;
+    background: var(--bg-secondary);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+
+  @media (max-width: 600px) {
+    .perf-bar {
+      width: 110px;
+    }
+  }
+</style>

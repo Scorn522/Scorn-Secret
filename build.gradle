@@ -1,0 +1,487 @@
+plugins {
+    id 'eclipse'
+    id 'idea'
+    id 'maven-publish'
+    id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+}
+
+version = '4.3-local-test-r15'
+group = 'com.himitsu.secret'
+
+base {
+    archivesName = 'Secret'
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+
+minecraft {
+    mappings channel: 'official', version: '1.20.1'
+    accessTransformer = file('src/main/resources/META-INF/accesstransformer.cfg')
+
+    runs {
+        configureEach {
+            workingDirectory project.file('run')
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'debug'
+            mods {
+                himitsu {
+                    source sourceSets.main
+                }
+            }
+        }
+
+        client {}
+
+        server {
+            args '--nogui'
+        }
+
+        data {
+            workingDirectory project.file('run-data')
+            args '--mod', 'secret', '--all', '--output', file('src/generated/resources/'), '--existing', file('src/main/resources/')
+        }
+    }
+}
+
+sourceSets.main.resources { srcDir 'src/generated/resources' }
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    minecraft 'net.minecraftforge:forge:1.20.1-47.4.20'
+}
+
+tasks.named('processResources', ProcessResources).configure {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from('native/third_party/imgui/LICENSE.txt') { into 'META-INF/licenses'; rename { 'imgui-LICENSE.txt' } }
+    from('native/third_party/minhook/LICENSE.txt') { into 'META-INF/licenses'; rename { 'minhook-LICENSE.txt' } }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 17
+}
+
+def usePreparedNative = providers.gradleProperty('usePreparedNative')
+    .map { it.toBoolean() }
+    .orElse(false)
+def preparedNativeResource = layout.projectDirectory.file('src/main/resources/himitsu.dll')
+def localNativeBuild = layout.buildDirectory.dir('native-local')
+def localNativeDll = localNativeBuild.map { it.file('himitsu.dll') }
+def localKeys = layout.buildDirectory.file('local-config/package-secrets.json')
+def localKeyHeader = layout.buildDirectory.file('local-config/himitsu/local_test_build.hpp')
+def pythonCommand = providers.environmentVariable('HIMITSU_PYTHON').orElse('python')
+
+tasks.register('configureNative', Exec) {
+    dependsOn tasks.named('compileJava')
+    inputs.file 'native/CMakeLists.txt'
+    inputs.file 'tools/build_native.py'
+    outputs.files(localNativeBuild.map { it.file('CMakeCache.txt') }, localKeys, localKeyHeader)
+    doFirst {
+        environment 'JAVA_HOME', tasks.named('compileJava').get().javaCompiler.get().metadata.installationPath.asFile.absolutePath
+        commandLine pythonCommand.get(), file('tools/build_native.py').absolutePath, 'configure'
+    }
+}
+tasks.register('buildNative', Exec) {
+    dependsOn tasks.named('configureNative')
+    inputs.files(fileTree('native') { include 'assets/**', 'include/**', 'src/**', 'third_party/**', 'tools/**', 'CMakeLists.txt' })
+    inputs.file layout.buildDirectory.file('classes/java/main/com/himitsu/secret/bridge/NativeBridge.class')
+    inputs.file localKeyHeader
+    outputs.file localNativeDll
+    doFirst { commandLine pythonCommand.get(), file('tools/build_native.py').absolutePath, 'build' }
+}
+tasks.register('syncNativeResource', Copy) {
+    dependsOn tasks.named('buildNative')
+    from localNativeDll
+    into layout.projectDirectory.dir('src/main/resources')
+}
+
+tasks.register('verifyPreparedNative') {
+    inputs.file preparedNativeResource
+    doLast {
+        def dll = preparedNativeResource.asFile
+        if (!dll.isFile()) {
+            throw new GradleException("Prepared native DLL is missing: ${dll.absolutePath}")
+        }
+        byte[] bytes = dll.bytes
+        if (bytes.length < 0x40 || (bytes[0] & 0xff) != 0x4d || (bytes[1] & 0xff) != 0x5a) {
+            throw new GradleException("Prepared native resource is not a PE image: ${dll.absolutePath}")
+        }
+        int peOffset = (bytes[0x3c] & 0xff)
+            | ((bytes[0x3d] & 0xff) << 8)
+            | ((bytes[0x3e] & 0xff) << 16)
+            | ((bytes[0x3f] & 0xff) << 24)
+        if (peOffset < 0 || peOffset + 6 > bytes.length
+            || (bytes[peOffset] & 0xff) != 0x50
+            || (bytes[peOffset + 1] & 0xff) != 0x45
+            || bytes[peOffset + 2] != 0
+            || bytes[peOffset + 3] != 0) {
+            throw new GradleException("Prepared native resource has an invalid PE header: ${dll.absolutePath}")
+        }
+        int machine = (bytes[peOffset + 4] & 0xff) | ((bytes[peOffset + 5] & 0xff) << 8)
+        if (machine != 0x8664) {
+            throw new GradleException(String.format(
+                "Prepared native resource must be x64 (machine=0x%04X): %s",
+                machine,
+                dll.absolutePath
+            ))
+        }
+        logger.lifecycle("Using prepared x64 native DLL: ${dll.absolutePath} (${bytes.length} bytes)")
+    }
+}
+
+tasks.named('processResources').configure {
+    if (usePreparedNative.get()) {
+        dependsOn tasks.named('verifyPreparedNative')
+    } else {
+        dependsOn tasks.named('syncNativeResource')
+    }
+}
+
+// The digest is generated from the very image packaged into this candidate.
+def nativeDescriptor = layout.buildDirectory.dir('generated-native-descriptor')
+tasks.register('generateNativeDigest') {
+    dependsOn tasks.named(usePreparedNative.get() ? 'verifyPreparedNative' : 'syncNativeResource')
+    inputs.file preparedNativeResource
+    outputs.file nativeDescriptor.map { it.file('META-INF/secret-native.sha256') }
+    doLast {
+        def digest = java.security.MessageDigest.getInstance('SHA-256').digest(preparedNativeResource.asFile.bytes)
+        def target = nativeDescriptor.get().file('META-INF/secret-native.sha256').asFile
+        target.parentFile.mkdirs()
+        target.setText(java.util.HexFormat.of().formatHex(digest) + '\n', 'US-ASCII')
+    }
+}
+tasks.named('processResources').configure {
+    dependsOn tasks.named('generateNativeDigest')
+    from nativeDescriptor
+}
+
+def secureToolOutput = layout.buildDirectory.dir('secure-tool')
+def nekoRoot = file('obfuscator/neko-obfuscator-main')
+def nekoProfile = file('config/neko.yml')
+def generatedNekoConfig = layout.buildDirectory.file('neko/neko.yml')
+def nekoOutputJar = layout.buildDirectory.file("neko/Secret-${project.version}-neko.jar")
+def nekoMapping = layout.buildDirectory.file("neko/Secret-${project.version}-neko.jar.map")
+def finalJar = layout.buildDirectory.file("libs/Secret-${project.version}.jar")
+def obfuscatedJar = layout.buildDirectory.file("libs/Secret-${project.version}-obfuscated.jar")
+def encryptionOnlyMapping = layout.buildDirectory.file('secure/encryption-only.map')
+def encryptionOnlyJar = layout.buildDirectory.file("libs/Secret-${project.version}-encrypted-only.jar")
+// Local build keys are generated once by configureNative and are never published.
+def releaseSecrets = {
+    def keyFile = localKeys.get().asFile
+    if (!keyFile.isFile()) throw new GradleException('Local build configuration is missing; run buildNative first.')
+    def parsed = new groovy.json.JsonSlurper().parseText(keyFile.getText('UTF-8'))
+    if (!(parsed.outer instanceof String) || parsed.outer.length() < 32 || !(parsed['class'] instanceof String) || parsed['class'].length() < 32)
+        throw new GradleException('Local build configuration is invalid')
+    return [outer: parsed.outer, 'class': parsed['class']]
+}
+
+tasks.register('compileSecureTool', JavaCompile) {
+    source = fileTree('tools/src') { include '**/*.java' }
+    classpath = files()
+    destinationDirectory = secureToolOutput
+    options.release = 17
+    options.encoding = 'UTF-8'
+}
+
+tasks.register('buildNekoCli', Exec) {
+    workingDir nekoRoot
+    commandLine 'cmd', '/c', 'gradlew.bat', ':neko-cli:installDist', '--console=plain'
+    inputs.files fileTree(nekoRoot) {
+        include '**/*.java', '**/*.kt', '**/*.kts', 'gradle.properties', 'gradle/libs.versions.toml'
+        exclude '**/build/**', '.gradle/**'
+    }
+    outputs.dir file('obfuscator/neko-obfuscator-main/neko-cli/build/install/neko-cli')
+}
+
+tasks.register('prepareNekoConfig') {
+    dependsOn tasks.named('reobfJar')
+    inputs.file nekoProfile
+    inputs.file tasks.named('jar').flatMap { it.archiveFile }
+    inputs.files configurations.compileClasspath
+    inputs.files fileTree(layout.buildDirectory.dir('fg_cache')) { include '**/*-injected.jar' }
+    outputs.file generatedNekoConfig
+    doLast {
+        def inputPath = tasks.named('jar').flatMap { it.archiveFile }.get().asFile.absolutePath.replace('\\', '/')
+        def outputPath = nekoOutputJar.get().asFile.absolutePath.replace('\\', '/')
+        // Neko receives the reobfuscated (SRG-named) JAR. Append ForgeGradle's
+        // injected SRG hierarchy after the official compile classpath so method
+        // override discovery uses the same namespace as the input bytecode.
+        def compileEntries = configurations.compileClasspath.files
+            .findAll { it.exists() }
+            .sort { a, b -> a.absolutePath <=> b.absolutePath }
+        def runtimeNamespaceEntries = fileTree(layout.buildDirectory.dir('fg_cache')) {
+            include '**/*-injected.jar'
+        }.files.findAll { it.exists() }.sort { a, b -> a.absolutePath <=> b.absolutePath }
+        def classpathYaml = 'classpath:\n' + (compileEntries + runtimeNamespaceEntries)
+            .collect { "  - '${it.absolutePath.replace('\\', '/').replace("'", "''")}'" }
+            .join('\n')
+        def rendered = nekoProfile.getText('UTF-8')
+            .replace('@INPUT@', inputPath)
+            .replace('@OUTPUT@', outputPath)
+            .replace('@CLASSPATH@', classpathYaml)
+        def target = generatedNekoConfig.get().asFile
+        target.parentFile.mkdirs()
+        target.setText(rendered, 'UTF-8')
+    }
+}
+
+tasks.register('nekoObfuscate', Exec) {
+    dependsOn tasks.named('buildNekoCli'), tasks.named('prepareNekoConfig'), tasks.named('reobfJar')
+    def cli = file('obfuscator/neko-obfuscator-main/neko-cli/build/install/neko-cli/bin/neko-cli.bat')
+    environment 'JAVA_OPTS', '-Xms512m -Xmx6g'
+    doFirst {
+        commandLine(
+            'cmd',
+            '/d',
+            '/s',
+            '/c',
+            "call \"${cli.absolutePath}\" obfuscate --config \"${generatedNekoConfig.get().asFile.absolutePath}\" --verbose"
+        )
+    }
+    inputs.file tasks.named('jar').flatMap { it.archiveFile }
+    inputs.file generatedNekoConfig
+    outputs.file nekoOutputJar
+    outputs.file nekoMapping
+}
+
+tasks.register('publishObfuscatedJar', Copy) {
+    dependsOn tasks.named('nekoObfuscate')
+    from nekoOutputJar
+    into layout.buildDirectory.dir('libs')
+    rename { "Secret-${project.version}-obfuscated.jar" }
+    outputs.file obfuscatedJar
+}
+
+tasks.register('verifyObfuscatedJar', JavaExec) {
+    dependsOn tasks.named('nekoObfuscate'), tasks.named('compileSecureTool')
+    classpath = files(secureToolOutput, nekoOutputJar) + configurations.compileClasspath
+    mainClass = 'com.himitsu.secret.tools.VerifyObfuscatedJar'
+    jvmArgs '-Xverify:all'
+    args nekoOutputJar.get().asFile.absolutePath, nekoMapping.get().asFile.absolutePath
+    inputs.file nekoOutputJar
+    inputs.file nekoMapping
+}
+
+tasks.register('secureJar', JavaExec) {
+    dependsOn tasks.named('verifyObfuscatedJar')
+    classpath = files(secureToolOutput)
+    mainClass = 'com.himitsu.secret.tools.SecureJarTool'
+    doFirst {
+        def secrets = releaseSecrets()
+        setArgs([
+            nekoOutputJar.get().asFile.absolutePath,
+            finalJar.get().asFile.absolutePath,
+            nekoMapping.get().asFile.absolutePath,
+            secrets.outer,
+            secrets.class
+        ])
+    }
+    inputs.file nekoOutputJar
+    inputs.file nekoMapping
+    outputs.file finalJar
+    outputs.upToDateWhen { false }
+}
+
+tasks.register('prepareEncryptionOnlyMapping') {
+    outputs.file encryptionOnlyMapping
+    doLast {
+        def target = encryptionOnlyMapping.get().asFile
+        target.parentFile.mkdirs()
+        target.setText(
+            [
+                'CLASS com/himitsu/secret/SecretMod -> com/himitsu/secret/SecretMod',
+                'CLASS com/himitsu/secret/bridge/SecretNative -> com/himitsu/secret/bridge/SecretNative',
+                'CLASS com/himitsu/secret/bridge/EarlyBootstrapService -> com/himitsu/secret/bridge/EarlyBootstrapService',
+                'CLASS com/himitsu/secret/code/BootstrapPayload -> com/himitsu/secret/code/BootstrapPayload'
+            ].join('\n') + '\n',
+            'UTF-8'
+        )
+    }
+}
+
+tasks.register('secureJarEncryptionOnly', JavaExec) {
+    dependsOn tasks.named('reobfJar'), tasks.named('compileSecureTool'), tasks.named('prepareEncryptionOnlyMapping')
+    classpath = files(secureToolOutput)
+    mainClass = 'com.himitsu.secret.tools.SecureJarTool'
+    doFirst {
+        def secrets = releaseSecrets()
+        setArgs([
+            tasks.named('jar').flatMap { it.archiveFile }.get().asFile.absolutePath,
+            encryptionOnlyJar.get().asFile.absolutePath,
+            encryptionOnlyMapping.get().asFile.absolutePath,
+            secrets.outer,
+            secrets.class
+        ])
+    }
+    inputs.file tasks.named('jar').flatMap { it.archiveFile }
+    inputs.file encryptionOnlyMapping
+    outputs.file encryptionOnlyJar
+    outputs.upToDateWhen { false }
+}
+
+tasks.register('verifyPackagedNative') {
+    dependsOn tasks.named('secureJar'), tasks.named('secureJarEncryptionOnly'), tasks.named('publishObfuscatedJar')
+    inputs.file preparedNativeResource
+    inputs.files finalJar, obfuscatedJar, encryptionOnlyJar
+    doLast {
+        byte[] expected = preparedNativeResource.asFile.bytes
+        [finalJar.get().asFile, obfuscatedJar.get().asFile, encryptionOnlyJar.get().asFile].each { jarFile ->
+            def zip = new java.util.zip.ZipFile(jarFile)
+            try {
+                def entry = zip.getEntry('himitsu.dll')
+                if (entry == null) {
+                    throw new GradleException("Packaged JAR is missing himitsu.dll: ${jarFile.absolutePath}")
+                }
+                byte[] packaged = zip.getInputStream(entry).bytes
+                if (!java.util.Arrays.equals(expected, packaged)) {
+                    throw new GradleException("Packaged himitsu.dll differs from the local native build: ${jarFile.absolutePath}")
+                }
+                logger.lifecycle("Verified local himitsu.dll in ${jarFile.name} (${packaged.length} bytes)")
+            } finally {
+                zip.close()
+            }
+        }
+    }
+}
+
+
+
+tasks.register('buildAuthServerDistribution', Exec) {
+    workingDir file('auth-server')
+    commandLine 'cmd', '/d', '/s', '/c', 'call "..\\gradlew.bat" clean installDist distZip --console=plain'
+    inputs.files fileTree('auth-server/src') { include '**/*' }
+    inputs.file file('auth-server/build.gradle')
+    outputs.file file('auth-server/build/distributions/scorn-secret-auth-server-1.0.0.zip')
+}
+
+
+jar {
+    destinationDirectory = layout.buildDirectory.dir('intermediate')
+    manifest {
+        attributes([
+            'Specification-Title': 'Secret',
+            'Specification-Vendor': 'Scorn',
+            'Specification-Version': '1',
+            'Implementation-Title': project.name,
+            'Implementation-Version': project.jar.archiveVersion,
+            'Implementation-Vendor': 'Scorn'
+        ])
+    }
+    finalizedBy 'reobfJar'
+}
+
+publishing {
+    publications {
+        register('mavenJava', MavenPublication) {
+            artifact jar
+        }
+    }
+    repositories {
+        maven {
+            url "file://${project.projectDir}/repo"
+        }
+    }
+}
+
+tasks.register('checkLocalShutdown', JavaExec) {
+    dependsOn tasks.named('compileJava'), tasks.named('compileSecureTool')
+    classpath = files(secureToolOutput, layout.buildDirectory.dir('classes/java/main')) + configurations.runtimeClasspath
+    mainClass = 'com.himitsu.secret.tools.LocalShutdownCheck'
+}
+
+
+// Default builds stay local. Publishing/remote auth deployment is never a build dependency.
+tasks.register('localJar', Copy) {
+    dependsOn tasks.named('secureJarEncryptionOnly')
+    from encryptionOnlyJar
+    into layout.buildDirectory.dir('libs')
+    rename { "Secret-${project.version}.jar" }
+}
+tasks.register('verifyLocalJar') {
+    dependsOn tasks.named('localJar')
+    doLast {
+        def jarFile = layout.buildDirectory.file("libs/Secret-${project.version}.jar").get().asFile
+        def zip = new java.util.zip.ZipFile(jarFile)
+        try {
+            def entry = zip.getEntry('himitsu.dll')
+            if (entry == null || !java.util.Arrays.equals(preparedNativeResource.asFile.bytes, zip.getInputStream(entry).bytes))
+                throw new GradleException('Local JAR/native mismatch')
+            if (zip.getEntry('himitsu.jar') == null) throw new GradleException('Encrypted payload missing')
+            def digestEntry = zip.getEntry('META-INF/secret-native.sha256')
+            def expected = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance('SHA-256').digest(preparedNativeResource.asFile.bytes))
+            if (digestEntry == null || zip.getInputStream(digestEntry).getText('US-ASCII').trim() != expected)
+                throw new GradleException('Local JAR/native digest mismatch')
+        } finally { zip.close() }
+        logger.lifecycle("Secret local package ready: ${jarFile.absolutePath}")
+    }
+}
+tasks.register('checkNativeShutdown', Exec) {
+    dependsOn tasks.named('configureNative')
+    inputs.files fileTree('native/include'), file('native/tests/local_shutdown_test.cpp'), file('native/src/core/runtime_state.cpp'), file('tools/build_native.py')
+    outputs.file layout.buildDirectory.file('local-shutdown-test.exe')
+    doFirst {
+        environment 'JAVA_HOME', tasks.named('compileJava').get().javaCompiler.get().metadata.installationPath.asFile.absolutePath
+        commandLine pythonCommand.get(), file('tools/build_native.py').absolutePath, 'check'
+    }
+}
+tasks.named('check').configure { dependsOn tasks.named('checkLocalShutdown'), tasks.named('checkNativeShutdown') }
+tasks.named('build').configure { dependsOn tasks.named('verifyLocalJar') }
+
+sourceSets { checks { java.srcDir 'src/check/java'; compileClasspath += sourceSets.main.output + configurations.compileClasspath; runtimeClasspath += output + compileClasspath } }
+tasks.register('checkTargetGuards', JavaExec) {
+    dependsOn tasks.named('checksClasses')
+    classpath = sourceSets.checks.runtimeClasspath
+    mainClass = 'com.himitsu.secret.core.TargetGuardCheck'
+    jvmArgs '-Xverify:all'
+}
+tasks.named('check').configure { dependsOn tasks.named('checkTargetGuards') }
+
+tasks.register('checkNativeBootstrap', JavaExec) {
+    dependsOn tasks.named('checksClasses'), tasks.named('localJar')
+    classpath = sourceSets.checks.runtimeClasspath
+    mainClass = 'com.himitsu.secret.bridge.NativeBootstrapCheck'
+    jvmArgs '-Xverify:all'
+    args finalJar.get().asFile.absolutePath
+}
+tasks.named('check').configure { dependsOn tasks.named('checkNativeBootstrap') }
+
+tasks.register('compileBridgeBindingCheck', Exec) {
+    dependsOn tasks.named('compileJava')
+    inputs.files file('native/tests/bridge_binding_test.cpp'), file('tools/build_native.py')
+    outputs.file layout.buildDirectory.file('bridge-binding-check.dll')
+    doFirst {
+        environment 'JAVA_HOME', tasks.named('compileJava').get().javaCompiler.get().metadata.installationPath.asFile.absolutePath
+        commandLine pythonCommand.get(), file('tools/build_native.py').absolutePath, 'bridge-check'
+    }
+}
+tasks.register('bridgeCheckAgent', Jar) {
+    dependsOn tasks.named('checksClasses')
+    archiveFileName = 'bridge-check-agent.jar'
+    destinationDirectory = layout.buildDirectory.dir('checks')
+    from(sourceSets.checks.output) { include 'com/himitsu/secret/bridge/BridgeBindingCheck*.class' }
+    manifest { attributes 'Premain-Class': 'com.himitsu.secret.bridge.BridgeBindingCheck' }
+}
+tasks.register('checkBridgeBinding', JavaExec) {
+    dependsOn tasks.named('bridgeCheckAgent'), tasks.named('compileBridgeBindingCheck')
+    classpath = sourceSets.checks.runtimeClasspath
+    mainClass = 'com.himitsu.secret.bridge.BridgeBindingCheck'
+    jvmArgs '-Xverify:all', "-javaagent:${layout.buildDirectory.file('checks/bridge-check-agent.jar').get().asFile.absolutePath}"
+    args layout.buildDirectory.file('bridge-binding-check.dll').get().asFile.absolutePath,
+         layout.buildDirectory.file('classes/java/main/com/himitsu/secret/bridge/NativeBridge.class').get().asFile.absolutePath
+}
+tasks.named('check').configure { dependsOn tasks.named('checkBridgeBinding') }
+
+// Explicit disposable-JVM check; loads the production DLL but never starts Minecraft.
+// Kept separate from ordinary model checks because it changes this check JVM's agents.
+tasks.register('checkNativeStartup', JavaExec) {
+    timeout = java.time.Duration.ofSeconds(45)
+    dependsOn tasks.named('bridgeCheckAgent'), tasks.named('localJar')
+    classpath = files(finalJar) + sourceSets.checks.output + configurations.runtimeClasspath
+    mainClass = 'com.himitsu.secret.bridge.NativeStartupCheck'
+    jvmArgs '-Xverify:all', "-javaagent:${layout.buildDirectory.file('checks/bridge-check-agent.jar').get().asFile.absolutePath}"
+    args finalJar.get().asFile.absolutePath, layout.projectDirectory.dir('.work/r7-native-startup').asFile.absolutePath
+    if (providers.gradleProperty('smokeJava').isPresent()) executable = providers.gradleProperty('smokeJava').get()
+}

@@ -1,0 +1,2 @@
+https://github.com/WindBlowAssCold/ollvm/releases/tag/archive-release
+https://github.com/ninja-build/ninja/releases/tag/v1.13.2

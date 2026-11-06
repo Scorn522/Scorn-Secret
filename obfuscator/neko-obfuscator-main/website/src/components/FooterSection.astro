@@ -1,0 +1,175 @@
+---
+// Footer — license, links, disclaimer
+---
+
+<footer class="footer">
+  <div class="container footer-inner">
+    <div class="footer-brand">
+      <div class="footer-logo">
+        <svg width="22" height="22" viewBox="0 0 32 32" fill="none">
+          <path d="M16 2C8.268 2 2 8.268 2 16s6.268 14 14 14 14-6.268 14-14S23.732 2 16 2z" fill="currentColor" opacity=".12"/>
+          <path d="M10 20l6-8 6 8" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="10" cy="21" r="2" fill="currentColor"/>
+          <circle cx="22" cy="21" r="2" fill="currentColor"/>
+        </svg>
+        <span>NekoObfuscator</span>
+      </div>
+      <p class="footer-tagline">
+        Advanced JVM bytecode and native obfuscation toolkit.
+      </p>
+    </div>
+
+    <div class="footer-links">
+      <div class="footer-col">
+        <span class="footer-col-title">Project</span>
+        <a href="https://github.com/Fadouse/neko-obfuscator" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/Fadouse/neko-obfuscator/blob/main/LICENSE" target="_blank" rel="noopener">License (GPL v3)</a>
+        <a href="https://github.com/Fadouse/neko-obfuscator/blob/main/README.md" target="_blank" rel="noopener">Documentation</a>
+      </div>
+      <div class="footer-col">
+        <span class="footer-col-title">Resources</span>
+        <a href="https://github.com/Fadouse/neko-obfuscator/blob/main/docs/ARCHITECTURE.md" target="_blank" rel="noopener">Architecture</a>
+        <a href="https://github.com/Fadouse/neko-obfuscator/blob/main/docs/WHITEPAPER.md" target="_blank" rel="noopener">Whitepaper</a>
+        <a href="https://github.com/Fadouse/neko-obfuscator/blob/main/docs/CONFIG.md" target="_blank" rel="noopener">Configuration</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="container footer-bottom">
+    <span class="footer-disclaimer">
+      NekoObfuscator is early-stage research software. APIs and bytecode shapes may change without notice.
+      Do not treat output as a security boundary or production-ready DRM.
+    </span>
+    <span class="footer-copy">&copy; 2026 NekoObfuscator. Built by autonomous AI agents.</span>
+  </div>
+</footer>
+
+<script>
+  import { gsap } from 'gsap';
+  import { ScrollTrigger } from 'gsap/ScrollTrigger';
+
+  gsap.registerPlugin(ScrollTrigger);
+
+  document.addEventListener('astro:page-load', () => {
+    gsap.fromTo('.footer-inner, .footer-bottom', {
+      y: 32,
+      opacity: 0,
+    }, {
+      y: 0,
+      opacity: 1,
+      duration: 0.7,
+      stagger: 0.1,
+      ease: 'power3.out',
+      scrollTrigger: {
+        trigger: '.footer',
+        start: 'top 92%',
+        toggleActions: 'play none none none',
+      },
+    });
+  });
+</script>
+
+<style>
+  .footer {
+    padding: 80px 0 36px;
+    border-top: 1px solid var(--divider);
+  }
+
+  .footer-inner {
+    display: flex;
+    justify-content: space-between;
+    gap: 48px;
+    margin-bottom: 40px;
+  }
+
+  .footer-brand {
+    max-width: 280px;
+  }
+
+  .footer-logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: var(--text-primary);
+    margin-bottom: 12px;
+  }
+
+  .footer-logo svg {
+    color: var(--accent);
+  }
+
+  .footer-tagline {
+    font-size: 0.82rem;
+    line-height: 1.5;
+  }
+
+  .footer-links {
+    display: flex;
+    gap: 60px;
+  }
+
+  .footer-col {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .footer-col-title {
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-tertiary);
+    margin-bottom: 4px;
+  }
+
+  .footer-col a {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    transition: color 0.2s ease;
+  }
+
+  .footer-col a:hover {
+    color: var(--text-primary);
+    opacity: 1;
+  }
+
+  .footer-bottom {
+    display: flex;
+    justify-content: space-between;
+    gap: 24px;
+    padding-top: 24px;
+    border-top: 1px solid var(--divider);
+  }
+
+  .footer-disclaimer {
+    font-size: 0.72rem;
+    color: var(--text-tertiary);
+    max-width: 500px;
+    line-height: 1.5;
+  }
+
+  .footer-copy {
+    font-size: 0.72rem;
+    color: var(--text-tertiary);
+    flex-shrink: 0;
+  }
+
+  @media (max-width: 600px) {
+    .footer-inner {
+      flex-direction: column;
+      gap: 36px;
+    }
+
+    .footer-links {
+      gap: 40px;
+    }
+
+    .footer-bottom {
+      flex-direction: column;
+      gap: 12px;
+    }
+  }
+</style>

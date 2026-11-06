@@ -1,0 +1,140 @@
+---
+const features = [
+  { title: 'Renamer', desc: 'ZKM-style class, field, and method renaming with mapping output and automatic reflection rewriting.' },
+  { title: 'Key Dispatch', desc: 'Hidden long-key injection into method signatures with automatic call-site rewriting.' },
+  { title: 'Control-Flow Flattening', desc: 'Keyed island dispatchers over verifier-safe blocks with per-edge evolving keys.' },
+  { title: 'Runtime Variable Obfuscation', desc: 'CFF-live keyed shadow storage for primitives — no ThreadLocal warehouse needed.' },
+  { title: 'Constant Obfuscation', desc: 'Numeric push, LDC, IINC, and ConstantValue rewriting bound to live CFF state.' },
+  { title: 'String Encryption', desc: 'AES/DES + XOR stream mixing with class-local cipher caches. No helper classes.' },
+  { title: 'InvokeDynamic', desc: 'CFF-state keyed indy indirection that eliminates static reference graphs from the constant pool.' },
+  { title: 'Native Translation', desc: 'Bytecode-to-C translation via Zig with direct HotSpot method-entry patching.' },
+];
+---
+
+<section class="features" id="features">
+  <div class="container">
+    <div class="section-label" data-animate>Features</div>
+    <h2 class="section-title" data-animate>Every layer counts.</h2>
+    <p class="section-subtitle" data-animate>
+      Eight independent transform stages that stack into a hardened protection chain.
+      Each operates at the bytecode level — no source modifications required.
+    </p>
+
+    <div class="features-grid">
+      {features.map((f, i) => (
+        <div class="feat-item" data-animate>
+          <span class="feat-num">{String(i + 1).padStart(2, '0')}</span>
+          <div class="feat-text">
+            <h3 class="feat-title">{f.title}</h3>
+            <p class="feat-desc">{f.desc}</p>
+          </div>
+        </div>
+      ))}
+    </div>
+  </div>
+</section>
+
+<script>
+  import { gsap } from 'gsap';
+  import { ScrollTrigger } from 'gsap/ScrollTrigger';
+
+  gsap.registerPlugin(ScrollTrigger);
+
+  document.addEventListener('astro:page-load', () => {
+    gsap.fromTo('.features .section-label, .features .section-title, .features .section-subtitle', {
+      y: 36,
+      opacity: 0,
+    }, {
+      y: 0,
+      opacity: 1,
+      duration: 0.8,
+      stagger: 0.1,
+      ease: 'power3.out',
+      scrollTrigger: {
+        trigger: '.features',
+        start: 'top 80%',
+        toggleActions: 'play none none none',
+      },
+    });
+
+    gsap.fromTo('.feat-item', {
+      y: 36,
+      opacity: 0,
+    }, {
+      y: 0,
+      opacity: 1,
+      duration: 0.6,
+      stagger: 0.06,
+      ease: 'power3.out',
+      scrollTrigger: {
+        trigger: '.features-grid',
+        start: 'top 78%',
+        toggleActions: 'play none none none',
+      },
+    });
+  });
+</script>
+
+<style>
+  .features-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    column-gap: 28px;
+    row-gap: 0;
+    margin-top: 48px;
+  }
+
+  .feat-item {
+    display: flex;
+    gap: 14px;
+    padding: 24px 0;
+    border-bottom: 1px solid var(--divider);
+    transition: background 0.25s ease;
+  }
+
+  .feat-item:hover {
+    background: var(--accent-subtle);
+  }
+
+  .feat-num {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-weight: 600;
+    color: var(--accent);
+    opacity: 0.7;
+    padding-top: 3px;
+    flex-shrink: 0;
+  }
+
+  .feat-text {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .feat-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--text-primary);
+  }
+
+  .feat-desc {
+    font-size: 0.85rem;
+    line-height: 1.55;
+    color: var(--text-tertiary);
+  }
+
+  @media (max-width: 1100px) {
+    .features-grid {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+
+  @media (max-width: 600px) {
+    .features-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

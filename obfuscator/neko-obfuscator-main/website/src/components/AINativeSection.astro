@@ -1,0 +1,242 @@
+---
+---
+
+<section class="ai-section" id="ai">
+  <div class="container">
+    <div class="ai-inner">
+      <div class="ai-text" data-animate>
+        <div class="section-label">AI-Native Engineering</div>
+        <h2 class="section-title">Built by autonomous agents,<br/>not boilerplate generators.</h2>
+        <p class="section-subtitle">
+          Every line of NekoObfuscator — from the bytecode IR to the HotSpot patching
+          layer — was synthesized by a multi-agent harness. One agent architects the
+          system and generates the heavy-lifting code; another verifies safety, models
+          JVM internals, and orchestrates native compilation. No human wrote a single
+          transform.
+        </p>
+        <p class="section-subtitle" style="margin-top: 16px;">
+          This isn't AI-assisted coding with autocomplete. It's autonomous software
+          engineering — agents that reason about JVM specs, design IR lowering passes,
+          and write cross-compilation pipelines. The result rivals commercial obfuscators
+          in structural complexity, built entirely by LLMs collaborating through a
+          structured harness.
+        </p>
+      </div>
+
+      <div class="ai-visual" data-animate>
+        <div class="ai-stat">
+          <span class="ai-stat-num">100<span class="ai-stat-pct">%</span></span>
+          <span class="ai-stat-label">AI-synthesized<br/>codebase</span>
+        </div>
+
+        <div class="ai-divider"></div>
+
+        <div class="ai-roles">
+          <div class="ai-role">
+            <div class="ai-role-badge">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+              </svg>
+            </div>
+            <span class="ai-role-name">Architect &amp; Generator</span>
+          </div>
+          <div class="ai-role">
+            <div class="ai-role-badge">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              </svg>
+            </div>
+            <span class="ai-role-name">Verifier &amp; Orchestrator</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+  import { gsap } from 'gsap';
+  import { ScrollTrigger } from 'gsap/ScrollTrigger';
+
+  gsap.registerPlugin(ScrollTrigger);
+
+  document.addEventListener('astro:page-load', () => {
+    gsap.fromTo('.ai-text [data-animate]', {
+      y: 48,
+      opacity: 0,
+    }, {
+      y: 0,
+      opacity: 1,
+      duration: 0.8,
+      stagger: 0.1,
+      ease: 'power3.out',
+      scrollTrigger: {
+        trigger: '.ai-section',
+        start: 'top 75%',
+        toggleActions: 'play none none none',
+      },
+    });
+
+    gsap.fromTo('.ai-stat', {
+      scale: 0.85,
+      opacity: 0,
+    }, {
+      scale: 1,
+      opacity: 1,
+      duration: 0.8,
+      ease: 'power3.out',
+      scrollTrigger: {
+        trigger: '.ai-visual',
+        start: 'top 78%',
+        toggleActions: 'play none none none',
+      },
+    });
+
+    gsap.fromTo('.ai-role', {
+      x: -20,
+      opacity: 0,
+    }, {
+      x: 0,
+      opacity: 1,
+      duration: 0.5,
+      stagger: 0.1,
+      ease: 'power3.out',
+      scrollTrigger: {
+        trigger: '.ai-roles',
+        start: 'top 82%',
+        toggleActions: 'play none none none',
+      },
+    });
+  });
+</script>
+
+<style>
+  .ai-inner {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 72px;
+    align-items: center;
+  }
+
+  .ai-visual {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+  }
+
+  /* ── Big stat ── */
+  .ai-stat {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 40px 48px;
+    border-radius: 20px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+
+  .ai-stat-num {
+    font-size: 5rem;
+    font-weight: 700;
+    letter-spacing: -0.04em;
+    line-height: 1;
+    color: var(--accent);
+  }
+
+  .ai-stat-pct {
+    font-size: 3rem;
+    font-weight: 500;
+    opacity: 0.6;
+  }
+
+  .ai-stat-label {
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    text-align: center;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+
+  /* ── Divider ── */
+  .ai-divider {
+    width: 1px;
+    height: 32px;
+    background: var(--border-strong);
+    margin: 0;
+  }
+
+  /* ── Roles ── */
+  .ai-roles {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+    max-width: 320px;
+    margin-top: 0;
+    padding: 20px;
+    border-radius: 16px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+
+  .ai-role {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    transition: background 0.2s ease;
+  }
+
+  .ai-role:hover {
+    background: var(--accent-subtle);
+  }
+
+  .ai-role-badge {
+    width: 34px;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+    background: var(--accent-subtle);
+    color: var(--accent);
+    flex-shrink: 0;
+  }
+
+  .ai-role-name {
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+
+  @media (max-width: 768px) {
+    .ai-inner {
+      grid-template-columns: 1fr;
+      gap: 40px;
+    }
+
+    .ai-visual {
+      align-items: stretch;
+    }
+
+    .ai-stat {
+      padding: 32px 24px;
+    }
+
+    .ai-stat-num {
+      font-size: 4rem;
+    }
+
+    .ai-roles {
+      max-width: none;
+    }
+  }
+</style>

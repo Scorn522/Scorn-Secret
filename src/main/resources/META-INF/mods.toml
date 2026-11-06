@@ -1,0 +1,22 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="MIT"
+[[mods]]
+modId="secret"
+version="4.3-local-test-r15"
+displayName="Secret (Local Test)"
+authors="himitsu"
+credits="Target-scoped local development by Scorn"
+description='''_'''
+[[dependencies.secret]]
+modId="forge"
+mandatory=true
+versionRange="[47,)"
+ordering="NONE"
+side="BOTH"
+[[dependencies.secret]]
+modId="minecraft"
+mandatory=true
+versionRange="[1.20.1,1.21)"
+ordering="NONE"
+side="BOTH"

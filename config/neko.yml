@@ -1,0 +1,91 @@
+version: 1
+
+input: "@INPUT@"
+output: "@OUTPUT@"
+
+@CLASSPATH@
+
+transforms:
+  renamer:
+    enabled: true
+    packagePrefix: lIlIlI/
+    renameRuntime: true
+    renameMembers: true
+    classNameAlphabet: lI
+    classNameLength: 24
+    keepClassNames:
+      - com/himitsu/secret/SecretMod
+      - com/himitsu/secret/bridge/NativeBridge
+      - com/himitsu/secret/bridge/SecretNative
+      - com/himitsu/secret/bridge/EarlyBootstrapService
+      - com/himitsu/secret/code/BootstrapPayload
+    keepMemberNamesInClasses:
+      - com/himitsu/secret/SecretMod
+      - com/himitsu/secret/bridge/NativeBridge
+      - com/himitsu/secret/bridge/SecretNative
+      - com/himitsu/secret/bridge/EarlyBootstrapService
+      - com/himitsu/secret/code/BootstrapPayload
+    keepMethodNames:
+      - com/himitsu/secret/util/SecretRuntime.boot
+
+  keyDispatch:
+    # Key dispatch depends on CFF call-site key material. In compact mode CFF is
+    # disabled, so enabling this pass changes callee descriptors without adding
+    # the matching key argument at excluded entry-point call sites.
+    enabled: false
+    excludeClasses: &plainClasses
+      - com/himitsu/secret/SecretMod
+      - com/himitsu/secret/bridge/NativeBridge
+      - com/himitsu/secret/bridge/SecretNative
+      - com/himitsu/secret/bridge/EarlyBootstrapService
+      - com/himitsu/secret/code/BootstrapPayload
+    excludeMethods: &plainMethods
+      - com/himitsu/secret/util/SecretRuntime.boot
+
+  methodParameterObfuscation:
+    enabled: false
+    excludeClasses: *plainClasses
+    excludeMethods: *plainMethods
+
+  controlFlowFlattening:
+    # Full CFF multiplies this project's bytecode volume (about 0.4 MB -> 14 MB
+    # of class data). Keep the lighter code transforms below, but leave CFF off.
+    enabled: false
+    intensity: 1.0
+    excludeClasses: *plainClasses
+    excludeMethods: *plainMethods
+
+  validationSinkHardening:
+    enabled: true
+    excludeClasses: *plainClasses
+    excludeMethods: *plainMethods
+
+  invokeDynamic:
+    enabled: false
+    excludeClasses: *plainClasses
+    excludeMethods: *plainMethods
+
+  constantObfuscation:
+    # This pass consumes CFF's class-key table, so it follows CFF in compact mode.
+    enabled: false
+    intensity: 1.0
+    excludeClasses: *plainClasses
+    excludeMethods: *plainMethods
+
+  stringObfuscation:
+    # The current implementation expands every string site through CFF material.
+    enabled: false
+    intensity: 1.0
+    excludeClasses: *plainClasses
+    excludeMethods: *plainMethods
+
+  runtimeVariableObfuscation:
+    enabled: false
+    excludeClasses: *plainClasses
+    excludeMethods: *plainMethods
+
+native:
+  enabled: false
+
+keys:
+  masterSeed: 5980780305148019276
