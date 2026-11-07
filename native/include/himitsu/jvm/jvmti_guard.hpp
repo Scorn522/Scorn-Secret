@@ -4,6 +4,7 @@
 #include <jvmti.h>
 
 namespace himitsu::jvm {
+bool expected_jvmti_dispatch(jvmtiInterface_1_*& address,jvmtiInterface_1_& expected);
 bool initialize_jvmti_guard(JavaVM* vm, jvmtiEnv* env);
 bool install_jvmti_guard();
 bool quarantine_external_jvmti(JNIEnv* env);

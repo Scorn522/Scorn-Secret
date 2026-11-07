@@ -510,23 +510,19 @@ public final class TargetGuardCheck {
         var lookup=java.lang.invoke.MethodHandles.lookup();
         var simple=lookup.findStatic(EventBusTakeover.class,"post",java.lang.invoke.MethodType.methodType(boolean.class,net.minecraftforge.eventbus.EventBus.class,net.minecraftforge.eventbus.api.Event.class));
         var dispatched=lookup.findStatic(EventBusTakeover.class,"post",java.lang.invoke.MethodType.methodType(boolean.class,net.minecraftforge.eventbus.EventBus.class,net.minecraftforge.eventbus.api.Event.class,net.minecraftforge.eventbus.api.IEventBusInvokeDispatcher.class));
-        Method publish=EventBusBridge.class.getDeclaredMethod("publish",Class.class,java.lang.invoke.MethodHandle[].class);publish.setAccessible(true);
-        for(var wrong:new java.lang.invoke.MethodHandle[][]{{simple},{simple,null},{dispatched,simple}}) {
-            try {publish.invoke(null,bridge,wrong);throw new AssertionError("bad bridge pair accepted");}catch(InvocationTargetException expected){check(expected.getCause() instanceof IllegalArgumentException,"wrong bridge failure type");}
-            check(slot.get(null)==null,"partial bridge publication");
+        Method validate=EventBusBridge.class.getDeclaredMethod("validate",java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class);validate.setAccessible(true);
+        for(var wrong:new java.lang.invoke.MethodHandle[][]{{simple,null},{dispatched,simple}}) {
+            try {validate.invoke(null,wrong[0],wrong[1]);throw new AssertionError("bad bridge pair accepted");}
+            catch(InvocationTargetException expected){check(expected.getCause() instanceof IllegalArgumentException,"wrong bridge failure type");}
+            check(slot.get(null)==null,"validation published partial binding");
         }
-        var pair=new java.lang.invoke.MethodHandle[]{simple,dispatched};publish.invoke(null,bridge,pair);
-        check(slot.get(null)==pair && (boolean)post.invoke(null,bus,new CancelEvent()),"bridge call did not preserve post result");
+        validate.invoke(null,simple,dispatched);
+        // This model only binds its own fixture. Native installation/publication is checked in the disposable JVM.
+        var pair=new java.lang.invoke.MethodHandle[]{simple,dispatched};slot.set(null,pair);
+        check((boolean)post.invoke(null,bus,new CancelEvent()),"bridge call did not preserve post result");
         var post3=bridge.getMethod("post",net.minecraftforge.eventbus.EventBus.class,net.minecraftforge.eventbus.api.Event.class,net.minecraftforge.eventbus.api.IEventBusInvokeDispatcher.class);
         check((boolean)post3.invoke(null,bus,new CancelEvent(),(net.minecraftforge.eventbus.api.IEventBusInvokeDispatcher)net.minecraftforge.eventbus.api.IEventListener::invoke),"dispatcher bridge signature changed");
-        try {publish.invoke(null,bridge,pair);throw new AssertionError("bridge replaced binding");}catch(InvocationTargetException expected){check(expected.getCause() instanceof IllegalStateException,"rebind failure type");}
-        Field installed=EventBusBridge.class.getDeclaredField("installed"),bound=EventBusBridge.class.getDeclaredField("bound");installed.setAccessible(true);bound.setAccessible(true);
-        Object old=installed.get(null),oldBound=bound.get(null);
-        try {
-            installed.set(null,bridge);bound.set(null,pair);
-            try {check(EventBusBridge.defineAndBind()==bridge,"repeat installation redefined bridge");}catch(Throwable error){throw new AssertionError(error);}
-            slot.set(null,pair.clone());try {EventBusBridge.defineAndBind();throw new AssertionError("changed binding accepted");}catch(IllegalStateException expected){}catch(Throwable error){throw new AssertionError(error);}
-        } finally {installed.set(null,old);bound.set(null,oldBound);}
+        check(Arrays.stream(EventBusBridge.class.getDeclaredFields()).noneMatch(f->f.getName().equals("bound")),"duplicate Java binding authority survived");
         var node=new org.objectweb.asm.tree.ClassNode();try(InputStream in=EventBusBridge.class.getResourceAsStream("EventBusBridge.class")){new ClassReader(in).accept(node,0);}
         for(var method:node.methods)for(var insn:method.instructions)if(insn instanceof org.objectweb.asm.tree.MethodInsnNode call)
             check(!(call.owner.equals("java/lang/Class")&&call.name.equals("forName")),"foreign same-name bridge adoption survived");

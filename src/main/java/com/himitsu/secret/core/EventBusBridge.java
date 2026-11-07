@@ -6,7 +6,6 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandleInfo;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
-import java.lang.reflect.Modifier;
 import net.minecraftforge.eventbus.EventBus;
 import net.minecraftforge.eventbus.api.Event;
 import net.minecraftforge.eventbus.api.IEventBusInvokeDispatcher;
@@ -17,45 +16,36 @@ final class EventBusBridge {
     private static final String POST = "(Lnet/minecraftforge/eventbus/EventBus;Lnet/minecraftforge/eventbus/api/Event;)Z";
     private static final String POST_DISPATCHER = "(Lnet/minecraftforge/eventbus/EventBus;Lnet/minecraftforge/eventbus/api/Event;Lnet/minecraftforge/eventbus/api/IEventBusInvokeDispatcher;)Z";
     private static Class<?> installed;
-    private static MethodHandle[] bound;
     private EventBusBridge() {}
 
     static synchronized Class<?> defineAndBind() throws Throwable {
         if(installed!=null) {
-            var field=installed.getDeclaredField("handlers");field.setAccessible(true);
-            if(field.get(null)!=bound) throw new IllegalStateException("EventBus bridge binding changed");
-            return installed;
+            Object checked=SecretNative.invokeChecked("VerifyEventBusBridge");
+            if(!(checked instanceof Class<?> bridge))throw new IllegalStateException("EventBus bridge unavailable");
+            installed=bridge;return bridge;
         }
-        // A foreign class occupying this name must cause a definition conflict, never be adopted.
-        ClassLoader loader=EventBus.class.getClassLoader();
-        Object result=SecretNative.invokeChecked("DefineClass",INTERNAL_NAME,loader,bytes());
-        if(!(result instanceof Class<?> bridge) || bridge.getClassLoader()!=loader
-            || !bridge.getName().equals(INTERNAL_NAME.replace('/','.')) || bridge.getSuperclass()!=Object.class)
-            throw new IllegalStateException("Cannot define EventBus bridge");
         MethodHandles.Lookup lookup=MethodHandles.lookup();
         MethodHandle[] handlers={
             lookup.unreflect(DynamicMethodLookup.findStatic(EventBusTakeover.class,boolean.class,EventBus.class,Event.class)),
             lookup.unreflect(DynamicMethodLookup.findStatic(EventBusTakeover.class,boolean.class,EventBus.class,Event.class,IEventBusInvokeDispatcher.class))};
-        publish(bridge,handlers);
-        bound=handlers;installed=bridge;return bridge;
+        Object result=SecretNative.invokeChecked("DefineEventBusBridge",bytes(),EventBus.class,handlers);
+        if(!(result instanceof Class<?> bridge) || bridge.getClassLoader()!=EventBus.class.getClassLoader()
+            || !bridge.getName().equals(INTERNAL_NAME.replace('/','.')) || bridge.getSuperclass()!=Object.class)
+            throw new IllegalStateException("Cannot define EventBus bridge");
+        installed=bridge;return bridge;
     }
-    private static void publish(Class<?> bridge,MethodHandle[] handlers) throws ReflectiveOperationException {
-        if(handlers==null || handlers.length!=2) throw new IllegalArgumentException("Incomplete EventBus binding");
+    // Called only during the Native installation transaction, on pinned local handle references.
+    private static void validate(MethodHandle first,MethodHandle second) throws ReflectiveOperationException {
+        if(first==null || second==null)throw new IllegalArgumentException("Incomplete EventBus binding");
         var lookup=MethodHandles.lookup();
+        MethodHandle[] handlers={first,second};
         for(int i=0;i<2;i++) {
-            if(handlers[i]==null) throw new IllegalArgumentException("Incomplete EventBus binding");
             MethodType expected=MethodType.fromMethodDescriptorString(i==0?POST:POST_DISPATCHER,EventBus.class.getClassLoader());
             var info=lookup.revealDirect(handlers[i]);
             if(!handlers[i].type().equals(expected) || info.getDeclaringClass()!=EventBusTakeover.class
                 || info.getReferenceKind()!=MethodHandleInfo.REF_invokeStatic)
                 throw new IllegalArgumentException("Unexpected EventBus handler");
         }
-        var field=bridge.getDeclaredField("handlers");
-        if(field.getType()!=MethodHandle[].class || field.getModifiers()!=(Modifier.PRIVATE|Modifier.STATIC|Modifier.VOLATILE))
-            throw new IllegalStateException("Invalid EventBus bridge field");
-        field.setAccessible(true);
-        if(field.get(null)!=null) throw new IllegalStateException("EventBus bridge already bound");
-        field.set(null,handlers);
     }
     private static byte[] bytes() {
         ClassWriter writer=new ClassWriter(ClassWriter.COMPUTE_FRAMES|ClassWriter.COMPUTE_MAXS);

@@ -253,6 +253,13 @@ jobject dispatch_command(JNIEnv* env, jstring command_value, jobjectArray argume
             argument(env, arguments, 1)
         );
     }
+    if(command=="DefineEventBusBridge" || command=="VerifyEventBusBridge") {
+        if(!himitsu::validation::capability::is_enabled(himitsu::validation::capability::Feature::def_class))
+            return himitsu::jvm::new_exception(env,"java/lang/SecurityException","Feature not enabled");
+        if(command=="VerifyEventBusBridge")return himitsu::jvm::verify_event_bridge(env);
+        return himitsu::jvm::define_event_bridge(env,static_cast<jbyteArray>(argument(env,arguments,0)),
+            static_cast<jclass>(argument(env,arguments,1)),static_cast<jobjectArray>(argument(env,arguments,2)));
+    }
     if (command == "DefineClass") {
         if (!himitsu::validation::capability::is_enabled(
                 himitsu::validation::capability::Feature::def_class)) {

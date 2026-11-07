@@ -177,6 +177,15 @@ extern "C" {
     // Applies all queued changes in one go.
     MH_STATUS WINAPI MH_ApplyQueued(VOID);
 
+    // Immutable bytes produced by this MinHook instance, never recaptured from live code.
+    typedef struct MH_HOOK_SNAPSHOT {
+        LPVOID target, patch, trampoline, replacement;
+        UINT patchSize, trampolineSize;
+        BOOL enabled, patchAbove;
+        BYTE original[8], installed[8], relocated[64];
+    } MH_HOOK_SNAPSHOT;
+    MH_STATUS WINAPI MH_GetHookSnapshot(LPVOID target, MH_HOOK_SNAPSHOT* result);
+
     // Translates the MH_STATUS to its name as a string.
     const char * WINAPI MH_StatusToString(MH_STATUS status);
 

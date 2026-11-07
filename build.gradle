@@ -5,7 +5,7 @@ plugins {
     id 'net.minecraftforge.gradle' version '[6.0,6.2)'
 }
 
-version = '4.3-local-test-r20'
+version = '4.3-local-test-r22'
 group = 'com.himitsu.secret'
 
 base {
@@ -461,7 +461,7 @@ tasks.named('check').configure { dependsOn tasks.named('checkRememberedCredentia
 
 tasks.register('checkNativeShutdown', Exec) {
     dependsOn tasks.named('configureNative')
-    inputs.files fileTree('native/include'), file('native/tests/local_shutdown_test.cpp'), file('native/src/core/runtime_state.cpp'), file('tools/build_native.py')
+    inputs.files fileTree('native/include'), file('native/tests/local_shutdown_test.cpp'), file('native/src/core/runtime_state.cpp'), file('tools/build_native.py'), file('native/src/jvm/late_recovery.cpp'), fileTree('native/third_party/minhook'), file('native/src/platform/windows/module_guard.cpp')
     outputs.file layout.buildDirectory.file('local-shutdown-test.exe')
     doFirst {
         environment 'JAVA_HOME', tasks.named('compileJava').get().javaCompiler.get().metadata.installationPath.asFile.absolutePath
@@ -525,4 +525,5 @@ tasks.register('checkNativeStartup', JavaExec) {
     jvmArgs '-Xverify:all', "-javaagent:${layout.buildDirectory.file('checks/bridge-check-agent.jar').get().asFile.absolutePath}"
     args finalJar.get().asFile.absolutePath, layout.projectDirectory.dir('.work/r7-native-startup').asFile.absolutePath, layout.buildDirectory.file('bridge-binding-check.dll').get().asFile.absolutePath, localKeys.get().asFile.absolutePath
     if (providers.gradleProperty('smokeJava').isPresent()) executable = providers.gradleProperty('smokeJava').get()
+    if (providers.gradleProperty('bridgeConflict').isPresent()) jvmArgs '-Dsecret.check.bridgeConflict=true'
 }

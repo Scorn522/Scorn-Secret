@@ -1,4 +1,5 @@
 #include "himitsu/jvm/native_bridge.hpp"
+#include "himitsu/platform/windows/module_guard.hpp"
 
 #include "himitsu/validation/validation_gate.hpp"
 
@@ -26,6 +27,8 @@ struct RuntimeCall {
 jobject JNICALL invoke_native(JNIEnv* env, jclass, jstring command, jobjectArray arguments) {
     RuntimeCall call;
     if (!call.entered) return himitsu::jvm::new_exception(env, "java/lang/IllegalStateException", "Secret native runtime is stopping");
+    if(!himitsu::platform::windows::native_interfaces_healthy())
+        return himitsu::jvm::new_exception(env,"java/lang/IllegalStateException","Secret native interface integrity unavailable; live code was not overwritten");
     himitsu::validation::require_approval();
     if (probe_active) {
         invoke_seen=true;
@@ -38,7 +41,7 @@ jobject JNICALL invoke_native(JNIEnv* env, jclass, jstring command, jobjectArray
 
 jboolean JNICALL ready_native(JNIEnv*, jclass) {
     RuntimeCall call;
-    if (!call.entered) return JNI_FALSE;
+    if (!call.entered || !himitsu::platform::windows::native_interfaces_healthy()) return JNI_FALSE;
     himitsu::validation::require_approval();
     if (probe_active) ready_seen=true;
     return himitsu::core::RuntimeState::instance().initialized() ? JNI_TRUE : JNI_FALSE;
@@ -203,7 +206,7 @@ int register_native_bridge(JavaVM* vm, jvmtiEnv* jvmti) {
             HIMITSU_LOG_INFO("NativeBridge","Hidden fallback verified=%s",verified?"true":"false");
         }
         if(verified) {
-            bool monitor=start_jvmti_guard_monitor();
+            bool monitor=remember_game_bootstrap(env,bootstrap) && start_jvmti_guard_monitor();
             jfieldID publication=monitor?env->GetStaticFieldID(bootstrap,"registeredBridge","Ljava/lang/Class;"):nullptr;
             if(publication)env->SetStaticObjectField(bootstrap,publication,bridge);
             result=monitor&&publication&&!env->ExceptionCheck()?0:9;

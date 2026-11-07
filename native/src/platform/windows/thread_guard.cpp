@@ -1,4 +1,6 @@
 #include "himitsu/platform/windows/thread_guard.hpp"
+#include "himitsu/platform/windows/module_guard.hpp"
+#include "himitsu/platform/windows/instrumentation_guard.hpp"
 #include "himitsu/core/native_log.hpp"
 #include "himitsu/core/runtime_state.hpp"
 #include <jni.h>
@@ -25,6 +27,7 @@ struct Hook {
     void* target=nullptr;
     std::atomic<void*> trampoline{nullptr};
     bool created=false;
+    std::uint64_t guard_token=0;
 };
 Hook stop_hook{L"jvm.dll","JVM_StopThread"}, suspend_hook{L"jvm.dll","JVM_SuspendThread"}, all_threads_hook{L"jvm.dll","JVM_GetAllThreads"};
 Hook base_suspend{L"kernelbase.dll","SuspendThread"}, base_terminate{L"kernelbase.dll","TerminateThread"};
@@ -112,9 +115,13 @@ bool prepare(Hook& hook,void* replacement) {
     if(result!=MH_OK || !original) {HIMITSU_LOG_ERROR("ThreadGuard","Cannot relocate %s: %s",hook.name,MH_StatusToString(result));return false;}
     hook.trampoline.store(original,std::memory_order_release);hook.created=true;return true;
 }
-bool enable(bool value) {
+bool enable(bool value,std::uint64_t deadline=0) {
     himitsu::platform::windows::ThreadHookMaintenance scope;
     bool queued=true;
+    for(Hook* hook:hooks)if(hook->created) {
+        if(!himitsu::platform::windows::guarded_hook_intact(hook->target))return false;
+        if(!value && !himitsu::platform::windows::unregister_guarded_region(hook->guard_token,deadline))return false;
+    }
     for(Hook* hook:hooks) if(hook->created) {
         auto result=value?MH_QueueEnableHook(hook->target):MH_QueueDisableHook(hook->target);
         if(result!=MH_OK) HIMITSU_LOG_ERROR("ThreadGuard","Cannot queue %s enable=%d: %s",hook->name,value,MH_StatusToString(result));
@@ -122,6 +129,10 @@ bool enable(bool value) {
     }
     auto result=MH_ApplyQueued();
     if(result!=MH_OK) HIMITSU_LOG_ERROR("ThreadGuard","Cannot apply thread hooks: %s",MH_StatusToString(result));
+    if(queued && result==MH_OK && value)for(Hook* hook:hooks)if(hook->created) {
+        hook->guard_token=himitsu::platform::windows::register_guarded_hook(hook->name,hook->target);
+        queued=queued && hook->guard_token!=0;
+    }
     return queued && result==MH_OK;
 }
 }
@@ -185,7 +196,8 @@ bool stop_thread_guard(std::uint64_t deadline) {
     admitting.store(false,std::memory_order_release);
     if(GetTickCount64()>deadline) return false;
     AcquireSRWLockExclusive(&hook_lock);
-    bool success=!installed.load(std::memory_order_acquire) || enable(false);
+    bool instrumentation=stop_instrumentation_entries(deadline);
+    bool success=(!installed.load(std::memory_order_acquire) || enable(false,deadline)) && instrumentation;
     if(success) installed.store(false,std::memory_order_release);
     // Disabled entries may still have in-flight callers; keep originals and trampolines.
     ReleaseSRWLockExclusive(&hook_lock);return success;

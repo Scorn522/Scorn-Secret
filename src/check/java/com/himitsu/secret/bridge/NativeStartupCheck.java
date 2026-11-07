@@ -6,11 +6,61 @@ import java.time.Duration;
 
 /** Explicit production-DLL startup check in a disposable JVM; never starts Forge or a world. */
 public final class NativeStartupCheck {
+    private static final java.util.Map<String,byte[]> authenticated=new java.util.LinkedHashMap<>();
     private static volatile boolean nestedDumpRequested;
     private static volatile byte[] nestedDump;
     private static volatile int heartbeatCallbacks;
     private static void check(boolean condition,String message) {
         if(!condition)throw new AssertionError(message);
+    }
+    private static Throwable rootCause(Throwable error) {
+        while(error.getCause()!=null && error.getCause()!=error)error=error.getCause();return error;
+    }
+    private static void verifyEventBridge() throws Exception {
+        try {SecretNative.invokeChecked("VerifyEventBusBridge");throw new AssertionError("untrusted bridge caller accepted");}
+        catch(IllegalStateException expected){check(rootCause(expected) instanceof SecurityException,"Wrong unauthenticated caller failure");}
+        for(String name:new String[]{"com/himitsu/secret/util/DynamicMethodLookup","com/himitsu/secret/core/EventBusTakeover$Handler","com/himitsu/secret/core/EventBusTakeover","com/himitsu/secret/core/EventBusBridge"}) {
+            byte[] image=authenticated.get(name);check(image!=null,"Missing authenticated bridge dependency "+name);
+            SecretNative.invokeChecked("DefineClass",name,SecretNative.class.getClassLoader(),image);
+        }
+        Class<?> installer=Class.forName("com.himitsu.secret.core.EventBusBridge");
+        var bytes=installer.getDeclaredMethod("bytes");bytes.setAccessible(true);byte[] original=(byte[])bytes.invoke(null);
+        var install=installer.getDeclaredMethod("defineAndBind");install.setAccessible(true);
+        String name="net/minecraftforge/eventbus/SecretEventBusBridge";
+        var busType=net.minecraftforge.eventbus.EventBus.class;
+        if(Boolean.getBoolean("secret.check.bridgeConflict")) {
+            SecretNative.invokeChecked("DefineClass",name,busType.getClassLoader(),original);
+            try {install.invoke(null);throw new AssertionError("Foreign existing bridge adopted");}
+            catch(java.lang.reflect.InvocationTargetException expected){check(rootCause(expected) instanceof LinkageError,"Conflict not preserved");}
+            System.out.println("EVENT_BRIDGE_CONFLICT_PASS no_adoption generation_rollback NO_GAME");return;
+        }
+        Class<?> bridge=(Class<?>)install.invoke(null);check(install.invoke(null)==bridge,"Repeat bridge install changed Class");
+        var slot=bridge.getDeclaredField("handlers");slot.setAccessible(true);
+        var expected=((java.lang.invoke.MethodHandle[])slot.get(null)).clone();
+        var replacement=expected.clone();replacement[0]=java.lang.invoke.MethodHandles.constant(boolean.class,true);
+        slot.set(null,replacement);long deadline=System.nanoTime()+3_000_000_000L;
+        while(System.nanoTime()<deadline && ((java.lang.invoke.MethodHandle[])slot.get(null))[0]!=expected[0])Thread.sleep(20);
+        var restored=(java.lang.invoke.MethodHandle[])slot.get(null);check(restored[0]==expected[0]&&restored[1]==expected[1],"Native monitor did not restore handler elements");
+        slot.set(null,null);check(install.invoke(null)==bridge,"Cold verification failed to repair whole array");
+        var node=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(original).accept(node,0);
+        for(var method:node.methods)if(method.name.equals("post")) {
+            method.instructions.clear();method.tryCatchBlocks.clear();if(method.localVariables!=null)method.localVariables.clear();
+            method.instructions.add(new org.objectweb.asm.tree.InsnNode(org.objectweb.asm.Opcodes.ICONST_1));
+            method.instructions.add(new org.objectweb.asm.tree.InsnNode(org.objectweb.asm.Opcodes.IRETURN));method.maxStack=1;
+        }
+        var writer=new org.objectweb.asm.ClassWriter(0);node.accept(writer);byte[] bad=writer.toByteArray();
+        check(Boolean.TRUE.equals(SecretNative.invokeChecked("RedefineClass",bridge,bad)),"Bridge redefine request failed");
+        var bus=(net.minecraftforge.eventbus.EventBus)net.minecraftforge.eventbus.api.BusBuilder.builder().build();bus.shutdown();
+        var post=bridge.getMethod("post",busType,net.minecraftforge.eventbus.api.Event.class);
+        check(!(boolean)post.invoke(null,bus,null),"Dynamic bridge bytecode was not restored");
+        ClassLoader other=new java.net.URLClassLoader(new java.net.URL[0],busType.getClassLoader());
+        Class<?> foreign=(Class<?>)SecretNative.invokeChecked("DefineClass",name,other,bad);
+        check((boolean)foreign.getMethod("post",busType,net.minecraftforge.eventbus.api.Event.class).invoke(null,bus,null),"Different loader was rewritten");
+        var failure=new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        Thread writerThread=new Thread(()->{try {for(int i=0;i<80;i++)slot.set(null,expected.clone());}catch(Throwable error){failure.set(error);}},"Secret-check-bridge-writer");
+        writerThread.start();for(int i=0;i<80;i++)check(install.invoke(null)==bridge,"Concurrent bridge verification failed");writerThread.join();
+        check(failure.get()==null,"Bridge concurrent fixture failed");check(install.invoke(null)==bridge,"Final bridge state unavailable");
+        System.out.println("EVENT_BRIDGE_PASS authenticated_installer exact_loader redefine_restore handlers_independent_baseline repeated_install concurrent_verify NO_GAME");
     }
     private static void verifySourceShield(Path archive) throws Exception {
         int decoded=0;
@@ -23,7 +73,7 @@ public final class NativeStartupCheck {
                     if(!entry.getName().endsWith(".bin"))continue;
                     byte[] bytes=(byte[])SecretNative.invokeChecked("DecryptPayloadClass",input.readAllBytes());
                     check(new org.objectweb.asm.ClassReader(bytes).getClassName().startsWith("com/himitsu/secret/"),"Unexpected authenticated class");
-                    decoded++;
+                    authenticated.put(new org.objectweb.asm.ClassReader(bytes).getClassName(),bytes);decoded++;
                 }
             }
             byte[] original;
@@ -256,6 +306,7 @@ public final class NativeStartupCheck {
                 check(count.getInt(null)==0,"External class callback survived early isolation");
                 verifyPackageBinding(archive,Path.of(args[3]));
                 verifySourceShield(archive);
+                verifyEventBridge();
                 verifyCallbackPublication();
                 verifyThreadGuards();
                 verifyEnvironmentChain(directory);

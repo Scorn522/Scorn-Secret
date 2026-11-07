@@ -132,7 +132,7 @@ void JNICALL class_file_load_hook(
             request->bytes.assign(class_data,class_data+class_data_len);
     }
 
-    const bool source_known=himitsu::jvm::apply_source_image(jvmti,name,class_data_len,class_data,new_class_data_len,new_class_data);
+    const bool source_known=himitsu::jvm::apply_source_image(env,jvmti,loader,class_being_redefined,name,class_data_len,class_data,new_class_data_len,new_class_data);
     const bool owned_source=source_known&&name!=nullptr&&std::strncmp(name,"com/himitsu/secret/",19)==0;
     if(source_known&&!owned_source)return; // JDK image restoration never enters mod transforms.
     const unsigned char* input_data=*new_class_data!=nullptr?*new_class_data:class_data;
@@ -577,9 +577,18 @@ jobject define_class(JNIEnv* env, jstring name, jobject loader, jbyteArray bytes
     const char* class_name = env->GetStringUTFChars(name, nullptr);
     jbyte* data = env->GetByteArrayElements(bytes, nullptr);
     const jsize length = env->GetArrayLength(bytes);
+    if(!class_name || !data || env->ExceptionCheck()) {
+        if(data)env->ReleaseByteArrayElements(bytes,data,JNI_ABORT);
+        if(class_name)env->ReleaseStringUTFChars(name,class_name);
+        return take_exception(env);
+    }
     HIMITSU_LOG_INFO("ClassControl", "请求 DefineClass：名称='%s'，加载器=%p，字节数=%d", class_name == nullptr ? "<invalid>" : class_name, loader, length);
     jclass result = env->DefineClass(class_name, loader, data, length);
-    const bool failed = env->ExceptionCheck();
+    bool failed = env->ExceptionCheck();
+    if(!failed && result && !remember_defined_installer(env,loader,result,reinterpret_cast<unsigned char*>(data),length)) {
+        env->ReleaseByteArrayElements(bytes,data,JNI_ABORT);env->ReleaseStringUTFChars(name,class_name);
+        return new_exception(env,"java/lang/IllegalStateException","Authenticated installer identity registration failed");
+    }
     env->ReleaseByteArrayElements(bytes, data, JNI_ABORT);
     env->ReleaseStringUTFChars(name, class_name);
     HIMITSU_LOG_INFO("ClassControl", "DefineClass 调用结束（类=%p，成功=%s）", result, failed ? "否" : "是");

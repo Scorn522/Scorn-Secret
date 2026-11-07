@@ -97,6 +97,7 @@ typedef struct _TRAMPOLINE
     LPVOID pRelay;          // [Out] Address of the relay function.
 #endif
     BOOL   patchAbove;      // [Out] Should use the hot patch area?
+    UINT   usedSize;        // Bytes emitted, including the x64 relay.
     UINT   nIP;             // [Out] Number of the instruction boundaries.
     UINT8  oldIPs[8];       // [Out] Instruction boundaries of the target function.
     UINT8  newIPs[8];       // [Out] Instruction boundaries of the trampoline function.

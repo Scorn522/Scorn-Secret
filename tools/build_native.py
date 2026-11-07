@@ -110,13 +110,24 @@ def main():
     else:
         output = ROOT / "build/local-shutdown-test.exe"
         output.parent.mkdir(parents=True, exist_ok=True)
-        run([zig, "c++", "-target", "x86_64-windows-gnu", "-std=c++20", "-O2",
-             "-D_WIN32_WINNT=0x0A00", "-DWIN32_LEAN_AND_MEAN", "-DNOMINMAX",
-             "-I", ROOT / "native/include", "-I", java / "include",
-             "-I", java / "include/win32", ROOT / "native/tests/local_shutdown_test.cpp",
-             ROOT / "native/src/core/runtime_state.cpp", "-o", output])
-        for scenario in ("normal", "timeout", "reader-timeout"):
+        objects = []
+        for source in ("buffer.c", "hook.c", "trampoline.c", "hde/hde64.c"):
+            obj = ROOT / "build" / (Path(source).stem + "-check.obj")
+            run([zig, "cc", "-target", "x86_64-windows-gnu", "-O2", "-c",
+                 ROOT / "native/third_party/minhook/src" / source, "-o", obj])
+            objects.append(obj)
+        common = [zig, "c++", "-target", "x86_64-windows-gnu", "-std=c++20", "-O2",
+                  "-D_WIN32_WINNT=0x0A00", "-DWIN32_LEAN_AND_MEAN", "-DNOMINMAX",
+                  "-I", ROOT / "native/include", "-I", ROOT / "native/third_party/minhook/include",
+                  "-I", java / "include", "-I", java / "include/win32",
+                  ROOT / "native/tests/local_shutdown_test.cpp", ROOT / "native/src/core/runtime_state.cpp", "-lpsapi"]
+        run(common + [objects[-1], "-o", output])
+        for scenario in ("recovery", "normal", "timeout", "reader-timeout"):
             print(run([output, scenario], timeout=15), end="", flush=True)
+        regions = ROOT / "build/local-region-test.exe"
+        run(common + ["-DHIMITSU_REGION_CHECK", *objects, "-lpsapi", "-o", regions])
+        print(run([regions], timeout=15), end="", flush=True)
+
 
 
 if __name__ == "__main__":

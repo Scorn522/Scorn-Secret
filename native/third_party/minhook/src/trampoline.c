@@ -314,7 +314,8 @@ BOOL CreateTrampolineFunction(PTRAMPOLINE ct)
 
     ct->pRelay = (LPBYTE)ct->pTrampoline + newPos;
     memcpy(ct->pRelay, &jmp, sizeof(jmp));
+    newPos += sizeof(jmp);
 #endif
-
+    ct->usedSize = newPos;
     return TRUE;
 }

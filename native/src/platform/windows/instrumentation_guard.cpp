@@ -1,6 +1,10 @@
 #include "himitsu/platform/windows/instrumentation_guard.hpp"
 
 #include "himitsu/core/native_log.hpp"
+#include "himitsu/platform/windows/thread_guard.hpp"
+#include "himitsu/platform/windows/module_guard.hpp"
+#include "MinHook.h"
+#include <jni.h>
 
 #include <windows.h>
 
@@ -39,16 +43,12 @@ HMODULE instrument_module() {
     return LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
 }
 
-bool patch_function_return_zero(void* function) {
-    constexpr std::array<unsigned char, 3> patch{0x31, 0xC0, 0xC3};
-    DWORD old_protection = 0;
-    if (!VirtualProtect(function, patch.size(), PAGE_EXECUTE_READWRITE, &old_protection)) return false;
-    std::memcpy(function, patch.data(), patch.size());
-    bool flushed = FlushInstructionCache(GetCurrentProcess(), function, patch.size()) != FALSE;
-    DWORD ignored = 0;
-    bool restored = VirtualProtect(function, patch.size(), old_protection, &ignored) != FALSE;
-    return flushed && restored;
-}
+void JNICALL blocked_load(JNIEnv*,jclass,jstring) {}
+void JNICALL blocked_classes(JNIEnv*,jobject,jlong,jobjectArray) {}
+void JNICALL blocked_flag(JNIEnv*,jobject,jlong,jboolean) {}
+std::array<void*,5> installed_targets{};
+std::array<std::uint64_t,5> installed_tokens{};
+
 }
 
 namespace himitsu::platform::windows {
@@ -67,20 +67,36 @@ bool disable_instrumentation_entries() {
         return false;
     }
 
-    bool success = true;
+    auto status=MH_Initialize();if(status!=MH_OK && status!=MH_ERROR_ALREADY_INITIALIZED)return false;
+    bool success = true;std::size_t index=0;
     for (const char* target : targets) {
+        const auto slot=index++;
         void* function = reinterpret_cast<void*>(GetProcAddress(instrument, target));
         if (function == nullptr) {
             HIMITSU_LOG_ERROR("Instrumentation", "未找到原生入口：%s", target);
             success = false;
             continue;
         }
-        if (!patch_function_return_zero(function)) {
-            HIMITSU_LOG_ERROR("Instrumentation", "原生入口替换失败：%s（错误码=%lu）", target, GetLastError());
-            success = false;
-            continue;
+        void* replacement=slot==0?reinterpret_cast<void*>(blocked_load):slot<3?reinterpret_cast<void*>(blocked_classes):reinterpret_cast<void*>(blocked_flag);
+        if(!installed_targets[slot]) {
+            void* original=nullptr;
+            if(MH_CreateHook(function,replacement,&original)!=MH_OK || !original){success=false;continue;}
+            installed_targets[slot]=function;
         }
+        if(installed_targets[slot]!=function || !guarded_hook_intact(function)){success=false;continue;}
+        {ThreadHookMaintenance scope;status=MH_EnableHook(function);}
+        if(status!=MH_OK && status!=MH_ERROR_ENABLED){success=false;continue;}
+        installed_tokens[slot]=register_guarded_hook(target,function);success=installed_tokens[slot]!=0 && success;
         HIMITSU_LOG_INFO("Instrumentation", "原生入口已禁用：%s", target);
+    }
+    return success;
+}
+bool stop_instrumentation_entries(std::uint64_t deadline) {
+    bool success=true;
+    for(std::size_t i=0;i<installed_targets.size();++i)if(auto target=installed_targets[i]) {
+        if(GetTickCount64()>deadline || !guarded_hook_intact(target) || !unregister_guarded_region(installed_tokens[i],deadline)){success=false;continue;}
+        ThreadHookMaintenance scope;auto status=MH_DisableHook(target);
+        success=(status==MH_OK || status==MH_ERROR_DISABLED) && success;
     }
     return success;
 }

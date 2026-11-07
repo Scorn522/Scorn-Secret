@@ -60,6 +60,7 @@ struct ImportPatch {
     void* original;
     void* replacement;
     std::uint64_t guard_token = 0;
+    void* allocation = nullptr;
 };
 
 struct InlineHook {
@@ -68,9 +69,6 @@ struct InlineHook {
     void* trampoline = nullptr;
     bool active = false;
     std::uint64_t target_guard = 0;
-    std::uint64_t hotpatch_guard = 0;
-    std::uint64_t trampoline_guard = 0;
-    std::uint64_t detour_guard = 0;
 };
 
 SRWLOCK hook_lock = SRWLOCK_INIT;
@@ -106,7 +104,6 @@ thread_local unsigned int swap_depth = 0;
 thread_local bool inside_gl_callback = false;
 thread_local GLuint draw_framebuffer = 0;
 bool minhook_initialized = false;
-bool gdi_guard_suspended = false;
 std::atomic<bool> hook_maintenance_enabled{false};
 std::atomic<ULONGLONG> last_hook_maintenance{0};
 std::atomic<ULONGLONG> last_directx_probe{0};
@@ -154,38 +151,25 @@ bool install_inline_hook(InlineHook& hook, void* target, void* replacement, void
         hook.target=target;hook.trampoline=trampoline;
     }
     if(original) *original=trampoline;
+    if(!himitsu::platform::windows::guarded_hook_intact(target))return false;
     MH_STATUS enable_status;
     { himitsu::platform::windows::ThreadHookMaintenance scope; enable_status=MH_EnableHook(target); }
     if(enable_status!=MH_OK && enable_status!=MH_ERROR_ENABLED) return false;
     hook.active = true;
     const std::string base_name = hook.name == nullptr ? "原生渲染入口" : hook.name;
-    hook.target_guard = himitsu::platform::windows::register_guarded_region(
-        (base_name + " 主入口").c_str(), target, 16
-    );
-    hook.hotpatch_guard = himitsu::platform::windows::register_guarded_region(
-        (base_name + " 热补丁区").c_str(),
-        reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(target) - 5),
-        5
-    );
-    hook.trampoline_guard = himitsu::platform::windows::register_guarded_region(
-        (base_name + " 跳板").c_str(), trampoline, 64
-    );
-    hook.detour_guard = himitsu::platform::windows::register_guarded_region(
-        (base_name + " 回调入口").c_str(), replacement, 16
-    );
+    hook.target_guard = himitsu::platform::windows::register_guarded_hook(base_name.c_str(),target);
+    if(!hook.target_guard)return false;
     if (original != nullptr) *original = trampoline;
     return true;
 }
 
-bool uninstall_inline_hook(InlineHook& hook) {
+bool uninstall_inline_hook(InlineHook& hook,std::uint64_t deadline) {
     if(!hook.active || !hook.target) return true;
+    if(!himitsu::platform::windows::guarded_hook_intact(hook.target)
+        || !himitsu::platform::windows::unregister_guarded_region(hook.target_guard,deadline))return false;
     MH_STATUS status;
     { himitsu::platform::windows::ThreadHookMaintenance scope;status=MH_DisableHook(hook.target); }
     if(status!=MH_OK && status!=MH_ERROR_DISABLED) return false;
-    himitsu::platform::windows::unregister_guarded_region(hook.detour_guard);
-    himitsu::platform::windows::unregister_guarded_region(hook.trampoline_guard);
-    himitsu::platform::windows::unregister_guarded_region(hook.hotpatch_guard);
-    himitsu::platform::windows::unregister_guarded_region(hook.target_guard);
     hook.active=false; // Retain the trampoline and original function for in-flight detours.
     return true;
 }
@@ -1195,16 +1179,12 @@ bool patch_slot(void** slot, void* replacement, void** first_original) {
     if (slot == nullptr || replacement == nullptr || *slot == replacement) return false;
     void* original = *slot;
     if (first_original != nullptr && *first_original == nullptr) *first_original = original;
-    DWORD old_protection = 0;
-    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old_protection)) return false;
-    *slot = replacement;
-    DWORD ignored = 0;
-    VirtualProtect(slot, sizeof(void*), old_protection, &ignored);
-    FlushInstructionCache(GetCurrentProcess(), slot, sizeof(void*));
-    const std::uint64_t guard_token = himitsu::platform::windows::register_guarded_region(
-        "原生渲染 IAT 槽", slot, sizeof(void*)
-    );
-    import_patches.push_back({slot, original, replacement, guard_token});
+    MEMORY_BASIC_INFORMATION page{};
+    if(VirtualQuery(slot,&page,sizeof(page))!=sizeof(page)
+        || !himitsu::jvm::native_pointer_exchange(slot,original,replacement,page.AllocationBase))return false;
+    const auto guard_token=himitsu::platform::windows::register_guarded_pointer("Render IAT slot",slot,replacement);
+    if(!guard_token){himitsu::jvm::native_pointer_exchange(slot,replacement,original,page.AllocationBase);return false;}
+    import_patches.push_back({slot,original,replacement,guard_token,page.AllocationBase});
     return true;
 }
 
@@ -1272,6 +1252,7 @@ bool install_export_hooks(const std::vector<HMODULE>& modules) {
     for (HMODULE module : modules) {
         FARPROC glfw = GetProcAddress(module, "glfwSwapBuffers");
         if (glfw != nullptr && module != self_module) {
+            himitsu::platform::windows::observe_guarded_module(module);
             installed |= install_inline_hook(
                 glfw_inline,
                 reinterpret_cast<void*>(glfw),
@@ -1303,23 +1284,12 @@ bool install_export_hooks(const std::vector<HMODULE>& modules) {
     HMODULE gdi = GetModuleHandleW(L"gdi32.dll");
     if (gdi != nullptr) {
         FARPROC swap = GetProcAddress(gdi, "SwapBuffers");
-        if (!gdi_guard_suspended) {
-            gdi_guard_suspended = himitsu::platform::windows::suspend_export_restore(
-                "gdi32.dll", "SwapBuffers", true
-            );
-        }
         installed |= install_inline_hook(
             gdi_inline,
             reinterpret_cast<void*>(swap),
             reinterpret_cast<void*>(&hooked_swap_buffers),
             reinterpret_cast<void**>(&original_swap_buffers)
         );
-        if (!gdi_inline.active && gdi_guard_suspended) {
-            himitsu::platform::windows::suspend_export_restore(
-                "gdi32.dll", "SwapBuffers", false
-            );
-            gdi_guard_suspended = false;
-        }
     }
 
     HMODULE win32u = GetModuleHandleW(L"win32u.dll");
@@ -1421,15 +1391,12 @@ void maintain_swap_buffers_hook() {
     };
     for (InlineHook* hook : hooks) {
         if (hook == nullptr || !hook->active || hook->target == nullptr) continue;
-        MH_STATUS status;
-        { ThreadHookMaintenance scope;status=MH_EnableHook(hook->target); }
-        if (status != MH_OK && status != MH_ERROR_ENABLED) {
-            HIMITSU_LOG_WARNING(
-                "Render",
-                "Render-hook guard re-enable failed (%s, status=%d)",
-                hook->name == nullptr ? "unknown" : hook->name,
-                status
-            );
+        if(!himitsu::platform::windows::guarded_hook_intact(hook->target))continue;
+        MH_HOOK_SNAPSHOT metadata{};
+        if(MH_GetHookSnapshot(hook->target,&metadata)==MH_OK && !metadata.enabled) {
+            ThreadHookMaintenance scope;
+            auto status=MH_EnableHook(hook->target);
+            if(status!=MH_OK)HIMITSU_LOG_WARNING("Render","Owned hook enable failed: %s",hook->name);
         }
     }
 
@@ -1457,33 +1424,25 @@ bool uninstall_swap_buffers_hook(std::uint64_t deadline) {
     himitsu::platform::windows::directx_assets::release_all();
     HookLock lock;
     bool complete=true;
-    complete=uninstall_inline_hook(dxgi_present_inline) && complete;
-    complete=uninstall_inline_hook(d3d9_present_inline) && complete;
-    complete=uninstall_inline_hook(blit_framebuffer_ext_inline) && complete;
-    complete=uninstall_inline_hook(bind_framebuffer_ext_inline) && complete;
-    complete=uninstall_inline_hook(blit_framebuffer_inline) && complete;
-    complete=uninstall_inline_hook(bind_framebuffer_inline) && complete;
-    complete=uninstall_inline_hook(ntgdi_inline) && complete;
-    complete=uninstall_inline_hook(wgl_layer_inline) && complete;
-    complete=uninstall_inline_hook(wgl_get_proc_inline) && complete;
-    complete=uninstall_inline_hook(glfw_inline) && complete;
-    complete=uninstall_inline_hook(gdi_inline) && complete;
-    if (gdi_guard_suspended) {
-        himitsu::platform::windows::suspend_export_restore(
-            "gdi32.dll", "SwapBuffers", false
-        );
-        gdi_guard_suspended = false;
-    }
+    complete=uninstall_inline_hook(dxgi_present_inline,deadline) && complete;
+    complete=uninstall_inline_hook(d3d9_present_inline,deadline) && complete;
+    complete=uninstall_inline_hook(blit_framebuffer_ext_inline,deadline) && complete;
+    complete=uninstall_inline_hook(bind_framebuffer_ext_inline,deadline) && complete;
+    complete=uninstall_inline_hook(blit_framebuffer_inline,deadline) && complete;
+    complete=uninstall_inline_hook(bind_framebuffer_inline,deadline) && complete;
+    complete=uninstall_inline_hook(ntgdi_inline,deadline) && complete;
+    complete=uninstall_inline_hook(wgl_layer_inline,deadline) && complete;
+    complete=uninstall_inline_hook(wgl_get_proc_inline,deadline) && complete;
+    complete=uninstall_inline_hook(glfw_inline,deadline) && complete;
+    complete=uninstall_inline_hook(gdi_inline,deadline) && complete;
 
     for (auto iterator = import_patches.rbegin(); iterator != import_patches.rend(); ++iterator) {
-        himitsu::platform::windows::unregister_guarded_region(iterator->guard_token);
-        if (!is_live_slot(iterator->slot) || *iterator->slot != iterator->replacement) continue;
-        DWORD old_protection = 0;
-        if (VirtualProtect(iterator->slot, sizeof(void*), PAGE_READWRITE, &old_protection)) {
-            *iterator->slot = iterator->original;
-            DWORD ignored = 0;
-            VirtualProtect(iterator->slot, sizeof(void*), old_protection, &ignored);
-        } else complete=false;
+        if(!himitsu::platform::windows::unregister_guarded_region(iterator->guard_token,deadline)){complete=false;continue;}
+        if(!is_live_slot(iterator->slot))continue;
+        void* current=nullptr;
+        if(!himitsu::jvm::native_memory_read(iterator->slot,&current,sizeof(current))){complete=false;continue;}
+        if(current==iterator->original)continue;
+        if(current!=iterator->replacement || !himitsu::jvm::native_pointer_exchange(iterator->slot,current,iterator->original,iterator->allocation))complete=false;
     }
     if(!complete) return false;
     import_patches.clear();

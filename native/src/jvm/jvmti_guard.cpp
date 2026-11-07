@@ -1,5 +1,8 @@
 #include <vector>
 #include "himitsu/jvm/jvmti_guard.hpp"
+#include "himitsu/jvm/source_images.hpp"
+#include "himitsu/platform/windows/thread_guard.hpp"
+#include "MinHook.h"
 
 #include "himitsu/core/native_log.hpp"
 #include "himitsu/core/runtime_state.hpp"
@@ -407,15 +410,30 @@ void* function_address(Function function) {
     return reinterpret_cast<void*>(function);
 }
 
-bool patch_return_none(void* function) {
-    if (function == nullptr) return false;
-    constexpr unsigned char patch[] = {0x31, 0xC0, 0xC3};
-    DWORD old_protection = 0;
-    if (!VirtualProtect(function, sizeof(patch), PAGE_EXECUTE_READWRITE, &old_protection)) return false;
-    std::memcpy(function, patch, sizeof(patch));
-    FlushInstructionCache(GetCurrentProcess(), function, sizeof(patch));
-    DWORD ignored = 0;
-    return VirtualProtect(function, sizeof(patch), old_protection, &ignored) != FALSE;
+void* dispose_hook_target=nullptr;
+std::uint64_t dispose_hook_token=0;
+jvmtiError JNICALL frozen_dispose(jvmtiEnv*) {return JVMTI_ERROR_NONE;}
+bool install_dispose_hook(void* function) {
+    if(!function || (dispose_hook_target && dispose_hook_target!=function))return false;
+    auto initialized=MH_Initialize();if(initialized!=MH_OK && initialized!=MH_ERROR_ALREADY_INITIALIZED)return false;
+    if(!dispose_hook_target) {
+        void* original=nullptr;
+        if(MH_CreateHook(function,reinterpret_cast<void*>(frozen_dispose),&original)!=MH_OK || !original)return false;
+        dispose_hook_target=function;
+    }
+    if(!himitsu::platform::windows::guarded_hook_intact(function))return false;
+    MH_STATUS enabled;
+    {himitsu::platform::windows::ThreadHookMaintenance scope;enabled=MH_EnableHook(function);}
+    if(enabled!=MH_OK && enabled!=MH_ERROR_ENABLED)return false;
+    dispose_hook_token=himitsu::platform::windows::register_guarded_hook("Owned JVMTI DisposeEnvironment",function);
+    return dispose_hook_token!=0;
+}
+bool stop_dispose_hook(std::uint64_t deadline) {
+    if(!dispose_hook_target)return true;
+    if(GetTickCount64()>deadline || !himitsu::platform::windows::guarded_hook_intact(dispose_hook_target)
+        || !himitsu::platform::windows::unregister_guarded_region(dispose_hook_token,deadline))return false;
+    himitsu::platform::windows::ThreadHookMaintenance scope;auto status=MH_DisableHook(dispose_hook_target);
+    return status==MH_OK || status==MH_ERROR_DISABLED; // Keep MinHook's trampoline alive.
 }
 
 void bind_recovered_dispatch(jvmtiEnv* env) {
@@ -448,7 +466,7 @@ bool restore_public_guard_slots() {
     };
     bool success = true;
     for (SlotPatch& patch : patches) success = exchange_slot(patch, patch.replacement) && success;
-    const bool dispose_frozen = patch_return_none(function_address(state.dispose_environment));
+    const bool dispose_frozen = install_dispose_hook(function_address(state.dispose_environment));
     HIMITSU_LOG_INFO(
         "JvmtiGuard",
         "恢复后的公开 JVMTI 守护槽重装结束（表槽=%s，DisposeEnvironment冻结=%s）",
@@ -535,7 +553,7 @@ bool restore_environment(jvmtiEnv* fresh) {
 
 bool refresh_impl() {
     const auto now = GetTickCount64();
-    if (state.monitor_stop.load(std::memory_order_acquire)
+    if (state.monitor_stop.load(std::memory_order_acquire) || !himitsu::platform::windows::native_interfaces_healthy()
         || now < state.next_refresh.load(std::memory_order_acquire)) return false;
     bool expected = false;
     if (!state.refreshing.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return false;
@@ -549,7 +567,8 @@ bool refresh_impl() {
         HIMITSU_LOG_INFO("JvmtiGuard", "开始刷新 JVMTI 环境（旧环境=%p，代数=%llu）",
             previous, state.generation.load(std::memory_order_acquire));
         if (!state.pending_env) {
-            if (JavaVM* vm = himitsu::jvm::late_recover_created_vm(); vm) cache_vm_calls(vm);
+            JavaVM* vm=himitsu::jvm::late_recover_created_vm();if(!vm)return false;
+            cache_vm_calls(vm);
         }
         VmAccess access;
         if (access.result != JNI_OK || !access.env || !access.get_env) return false;
@@ -561,8 +580,8 @@ bool refresh_impl() {
         }
         jvmtiEnv* fresh = state.pending_env;
         if (resolve_environment_link(fresh) != EnvironmentLink::linked) return false;
-        himitsu::platform::windows::suspend_jvmti_table_restore(true);
         table_update = true;
+        if(!himitsu::platform::windows::suspend_jvmti_table_restore(true))return false;
         if (!himitsu::jvm::late_recover_jvmti_dispatch(fresh)) return false;
         bind_recovered_dispatch(fresh);
         jvmtiPhase phase{};
@@ -666,6 +685,7 @@ DWORD WINAPI monitor_worker(void*) {
             }
             recover = !healthy;
         }
+        if(healthy)himitsu::jvm::maintain_event_bridge(jni);
         state.healthy.store(healthy, std::memory_order_release);
         if (!healthy && !link_reported) {
             HIMITSU_LOG_WARNING("JvmtiGuard", "JVMTI health unavailable (env=%p link=%d); unknown chains never trigger recreation", env, static_cast<int>(link));
@@ -689,6 +709,18 @@ DWORD WINAPI monitor_worker(void*) {
 }
 
 namespace himitsu::jvm {
+bool expected_jvmti_dispatch(jvmtiInterface_1_*& address,jvmtiInterface_1_& expected) {
+    AcquireSRWLockShared(&state.lock);address=state.table;expected=state.private_table;
+    bool ready=address && state.installed.load(std::memory_order_acquire);
+    ReleaseSRWLockShared(&state.lock);
+    if(!ready)return false;
+    expected.AddCapabilities=guarded_add_capabilities;expected.SetEventCallbacks=guarded_set_event_callbacks;
+    expected.SetExtensionEventCallback=guarded_set_extension_event_callback;expected.SetEventNotificationMode=guarded_set_event_notification_mode;
+    expected.RetransformClasses=guarded_retransform_classes;expected.RedefineClasses=guarded_redefine_classes;
+    expected.DisposeEnvironment=guarded_dispose_environment;expected.RelinquishCapabilities=guarded_relinquish_capabilities;
+    return true;
+}
+
 bool initialize_jvmti_guard(JavaVM* vm, jvmtiEnv* env) {
     static_assert(sizeof(void*) == 8);
     static_assert(std::is_standard_layout_v<jvmtiInterface_1_>);
@@ -787,7 +819,7 @@ bool install_jvmti_guard() {
         return false;
     }
 
-    if (!patch_return_none(function_address(state.dispose_environment))) {
+    if (!install_dispose_hook(function_address(state.dispose_environment))) {
         HIMITSU_LOG_ERROR("JvmtiGuard", "DisposeEnvironment 实现替换失败（目标=%p）", function_address(state.dispose_environment));
         return false;
     }
@@ -926,9 +958,9 @@ bool shutdown_jvmti_guard(std::uint64_t deadline) {
         himitsu::platform::windows::unregister_native_thread(state.monitor_thread);
         CloseHandle(state.monitor_thread);state.monitor_thread=nullptr;
     }
-    jvmtiEnv* env=current_env();if(!env) return true;
-    bool success=true;
-    if(state.set_event_notification_mode) success=state.set_event_notification_mode(env,JVMTI_DISABLE,JVMTI_EVENT_CLASS_FILE_LOAD_HOOK,nullptr)==JVMTI_ERROR_NONE;
+    bool success=stop_dispose_hook(deadline);
+    jvmtiEnv* env=current_env();if(!env)return success;
+    if(state.set_event_notification_mode) success=(state.set_event_notification_mode(env,JVMTI_DISABLE,JVMTI_EVENT_CLASS_FILE_LOAD_HOOK,nullptr)==JVMTI_ERROR_NONE)&&success;
     if(state.set_event_callbacks) {jvmtiEventCallbacks callbacks{};success=state.set_event_callbacks(env,&callbacks,sizeof(callbacks))==JVMTI_ERROR_NONE && success;}
     return success;
 }

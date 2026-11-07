@@ -64,6 +64,8 @@ typedef struct _HOOK_ENTRY
     LPVOID pDetour;             // Address of the detour or relay function.
     LPVOID pTrampoline;         // Address of the trampoline function.
     UINT8  backup[8];           // Original prologue of the target function.
+    LPVOID replacement;
+    UINT8 installedBytes[8], relocatedBytes[64], usedSize;
 
     UINT8  patchAbove  : 1;     // Uses the hot patch area.
     UINT8  isEnabled   : 1;     // Enabled.
@@ -608,6 +610,9 @@ MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID *ppOrigina
 #else
                             pHook->pDetour     = ct.pDetour;
 #endif
+                            pHook->replacement = pDetour;
+                            pHook->usedSize = (UINT8)ct.usedSize;
+                            memcpy(pHook->relocatedBytes,ct.pTrampoline,ct.usedSize);
                             pHook->pTrampoline = ct.pTrampoline;
                             pHook->patchAbove  = ct.patchAbove;
                             pHook->isEnabled   = FALSE;
@@ -630,6 +635,12 @@ MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID *ppOrigina
                                 memcpy(pHook->backup, pTarget, sizeof(JMP_REL));
                             }
 
+                            {
+                                LPBYTE patch=(LPBYTE)pTarget-(ct.patchAbove?sizeof(JMP_REL):0);
+                                JMP_REL jump={0xE9,(UINT32)((LPBYTE)pHook->pDetour-(patch+sizeof(JMP_REL)))};
+                                memcpy(pHook->installedBytes,&jump,sizeof(jump));
+                                if(ct.patchAbove) {pHook->installedBytes[5]=0xEB;pHook->installedBytes[6]=(BYTE)-7;}
+                            }
                             if (ppOriginal != NULL)
                                 *ppOriginal = pHook->pTrampoline;
                         }
@@ -936,4 +947,29 @@ const char *WINAPI MH_StatusToString(MH_STATUS status)
 #undef MH_ST2STR
 
     return "(unknown)";
+}
+
+// Query only: no thread suspension, code write, or baseline recapture.
+MH_STATUS WINAPI MH_GetHookSnapshot(LPVOID target,MH_HOOK_SNAPSHOT* result)
+{
+    MH_STATUS status=MH_ERROR_NOT_CREATED;
+    if(!result)return status;
+    EnterSpinLock();
+    if(g_hHeap) {
+        UINT pos=FindHookEntry(target);
+        if(pos!=INVALID_HOOK_POS) {
+            PHOOK_ENTRY hook=&g_hooks.pItems[pos];
+            memset(result,0,sizeof(*result));
+            result->target=hook->pTarget;result->trampoline=hook->pTrampoline;result->replacement=hook->replacement;
+            result->patchAbove=hook->patchAbove;result->enabled=hook->isEnabled;
+            result->patch=(LPBYTE)hook->pTarget-(hook->patchAbove?sizeof(JMP_REL):0);
+            result->patchSize=sizeof(JMP_REL)+(hook->patchAbove?sizeof(JMP_REL_SHORT):0);
+            result->trampolineSize=hook->usedSize;
+            memcpy(result->original,hook->backup,result->patchSize);
+            memcpy(result->installed,hook->installedBytes,result->patchSize);
+            memcpy(result->relocated,hook->relocatedBytes,result->trampolineSize);
+            status=MH_OK;
+        }
+    } else status=MH_ERROR_NOT_INITIALIZED;
+    LeaveSpinLock();return status;
 }
