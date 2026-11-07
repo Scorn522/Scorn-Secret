@@ -45,15 +45,39 @@ public final class TargetGuardCheck {
         for (Method method : com.himitsu.secret.item.CivilizationSurvivalItem.class.getDeclaredMethods())
             check(!method.getName().equals("onEntitySwing"),"legacy item swing duplicates execution");
     }
-    public static final class EntityFixture extends net.minecraft.world.entity.Entity {
+    public static class EntityFixture extends net.minecraft.world.entity.Entity implements Runnable {
         net.minecraftforge.entity.PartEntity<?>[] parts;
         static Collection<Object> cleanupRefs;
+        volatile int calls;
+        java.util.concurrent.CountDownLatch started,release;
+        volatile boolean interrupted;
+        public void run() {
+            calls++; if(started!=null) started.countDown();
+            if(release!=null) try { release.await(); } catch(InterruptedException error) { interrupted=true;Thread.currentThread().interrupt(); }
+        }
         EntityFixture() { super(net.minecraft.world.entity.EntityType.PIG,null); }
         public void defineSynchedData() {}
         public void readAdditionalSaveData(net.minecraft.nbt.CompoundTag tag) {}
         public void addAdditionalSaveData(net.minecraft.nbt.CompoundTag tag) {}
         public boolean isMultipartEntity() { return parts!=null; }
         public net.minecraftforge.entity.PartEntity<?>[] getParts() { return parts; }
+    }
+    public static final class CallableEntityFixture extends EntityFixture implements java.util.concurrent.Callable<Void> {
+        public Void call() { run(); return null; }
+    }
+    public static class CleanupRecord {
+        public Object entity,other;
+        public final String purpose="shared bookkeeping";
+        CleanupRecord(Object entity,Object other) {this.entity=entity;this.other=other;}
+    }
+    public static class CleanupData extends net.minecraft.world.level.saveddata.SavedData {
+        public Map<Object,Object> rows=new LinkedHashMap<>();
+        public List<UUID> history=new ArrayList<>();
+        public net.minecraft.nbt.CompoundTag save(net.minecraft.nbt.CompoundTag tag) {return tag;}
+    }
+    public static final class RetryCollection extends ArrayList<Object> {
+        int attempts;
+        public Iterator<Object> iterator() {attempts++;throw new ConcurrentModificationException("test-only registration change");}
     }
     public static final class PartFixture extends net.minecraftforge.entity.PartEntity<net.minecraft.world.entity.Entity> {
         PartFixture(net.minecraft.world.entity.Entity parent) { super(parent); }
@@ -351,6 +375,14 @@ public final class TargetGuardCheck {
         EntityFixture.cleanupRefs=new ArrayList<>(List.of(target));
         check(TargetCleanup.clean(target)&&!TargetCleanup.isIncomplete(target)&&EntityFixture.cleanupRefs.isEmpty(),"explicit rehit did not complete cleanup");
         EntityFixture.cleanupRefs=null;
+        var retry=new RetryCollection(); retry.add(target);EntityFixture.cleanupRefs=retry;
+        set(server,net.minecraft.server.MinecraftServer.class,"tickCount",100);
+        check(!TargetCleanup.clean(target),"changing cleanup reported complete");
+        for(int tick:new int[]{120,140,160,180}) {set(server,net.minecraft.server.MinecraftServer.class,"tickCount",tick);TargetCleanup.retryPending(level);}
+        check(retry.attempts==4,"transient retries were unbounded or missing");
+        EntityFixture.cleanupRefs=Collections.unmodifiableList(List.of(target));
+        check(!TargetCleanup.clean(target)&&((WeakTargetSet<net.minecraft.world.entity.Entity>)exhausted.get(null)).contains(target),"stable refusal kept automatic retries active");
+        EntityFixture.cleanupRefs=null;
         SecretFixture secret=(SecretFixture)unsafe.allocateInstance(SecretFixture.class); secret.id=88; secret.uuid=UUID.randomUUID();
         set(secret,net.minecraft.world.entity.Entity.class,"level",level);
         set(secret,net.minecraft.world.entity.Entity.class,"blockPosition",new net.minecraft.core.BlockPos(0,64,0));
@@ -380,6 +412,9 @@ public final class TargetGuardCheck {
         SecretEntityRegistry.clearLevel(otherWorld);
         check(SecretEntityRegistry.instance(level)==secret,"other dimension unload removed current Secret");
         AuthoritativeEntityTopology.clearLevel(level); SecretEntityRegistry.clearLevel(level);TargetCleanup.clearLevel(level);
+        check(!TargetCleanup.isIncomplete(target)&&!((WeakTargetSet<net.minecraft.world.entity.Entity>)exhausted.get(null)).contains(target),"unload retained target cleanup state");
+        Field cleanupQueuesField=TargetCleanup.class.getDeclaredField("queues");cleanupQueuesField.setAccessible(true);
+        check(!((Map<?,?>)cleanupQueuesField.get(null)).containsKey(level),"unload retained retry queue");
         manager.sectionStorage.remove(section);manager.visibleEntityStorage.byId.remove(88);
         AuthoritativeEntityTopology.maintain(secret);SecretEntityRegistry.register(secret);
         check(manager.sectionStorage.getSection(section)==null&&SecretEntityRegistry.instance(level)==null,"unloaded world was resurrected");
@@ -548,6 +583,21 @@ public final class TargetGuardCheck {
         registration.add(shared);index.put(third,Collections.synchronizedList(new ArrayList<>(List.of(shared))));list.register(id,bus,net.minecraftforge.eventbus.api.EventPriority.NORMAL,shared);
         check(!EventBusTakeover.detachTarget(bus,target),"shared callback treated as exclusive");bus.post(new CancelEvent());
         check(counts[0]==1&&counts[1]==2,"shared callback was removed");
+        var capture=(java.util.function.Consumer<CancelEvent>)(e->target.calls++);
+        bus.addListener(net.minecraftforge.eventbus.api.EventPriority.NORMAL,false,CancelEvent.class,capture);
+        check(!EventBusTakeover.detachTarget(bus,target),"capturing listener falsely reported fully detached");
+        bus.post(new CancelEvent());check(target.calls==1,"capturing shared listener removed or invoked during inspection");
+        var cleanup=new TargetCleanup.Cleaner(target);int state=EventBusTakeover.detachTargetState(bus,cleanup);
+        check((state&TargetCleanup.RETAINED)!=0&&(state&TargetCleanup.RETRY)==0,"stable listener index schedules retries");
+        int[] raceCalls={0};net.minecraftforge.eventbus.api.IEventListener raced=e->raceCalls[0]++;
+        var replacement=Collections.synchronizedList(new ArrayList<net.minecraftforge.eventbus.api.IEventListener>());
+        var changing=new ArrayList<net.minecraftforge.eventbus.api.IEventListener>() {
+            public Object[] toArray() {Object[] snapshot=super.toArray();index.put(target,replacement);return snapshot;}
+        };
+        changing.add(raced);index.put(target,changing);list.register(id,bus,net.minecraftforge.eventbus.api.EventPriority.NORMAL,raced);
+        cleanup=new TargetCleanup.Cleaner(target);state=EventBusTakeover.detachTargetState(bus,cleanup);
+        check((state&TargetCleanup.RETRY)!=0,"registration replacement not classified as transient");
+        bus.post(new CancelEvent());check(raceCalls[0]==1&&index.get(target)==replacement,"changed registration was detached or overwritten");
         bus.shutdown();
     }
     private static void checkR20Entrypoints() throws Exception {
@@ -660,7 +710,123 @@ public final class TargetGuardCheck {
         System.out.println("RENDER_HIERARCHY_PASS idle_normal_fallback_frame_reset_world_unload weak_loader_identity header_reuse_late_definition_update MODEL_NO_GL");
     }
 
+    private static sun.misc.Unsafe unsafe() throws Exception {
+        Field f=sun.misc.Unsafe.class.getDeclaredField("theUnsafe");f.setAccessible(true);return (sun.misc.Unsafe)f.get(null);
+    }
+    private static EntityFixture cleanupTarget() throws Exception {
+        var target=(EntityFixture)unsafe().allocateInstance(EntityFixture.class);target.id=811;target.uuid=UUID.randomUUID();return target;
+    }
+    private static void checkR23Cleanup() throws Exception {
+        var target=cleanupTarget();var other=cleanupTarget();other.id=812;
+        var cleaner=new TargetCleanup.Cleaner(target);
+        var wrapper=new CleanupRecord(target,other);var records=new ArrayList<Object>(List.of(wrapper));
+        check(cleaner.contents(records,0)&&records.size()==1&&records.get(0)==wrapper&&wrapper.entity==null&&wrapper.other==other,"shared record was deleted instead of unlinking target");
+        check(wrapper.purpose.equals("shared bookkeeping"),"wrapper state changed");
+        java.util.function.Consumer<Object> captured=ignored->{target.calls++;};
+        cleaner=new TargetCleanup.Cleaner(target);var callbacks=new ArrayList<Object>(List.of(captured));
+        check(!cleaner.contents(callbacks,0)&&callbacks.get(0)==captured&&cleaner.retained>0,"captured callback was modified");captured.accept(null);
+        check(target.calls==1,"capture inspection executed or broke callback");
+        var identity=new IdentityHashMap<Object,Object>();identity.put(target,"target record");identity.put(other,"neighbor");
+        cleaner=new TargetCleanup.Cleaner(target);check(cleaner.contents(identity,0)&&identity.size()==1&&identity.get(other).equals("neighbor"),"identity target key cleanup failed");
+        var sharedRecord=new CleanupRecord(target,other);identity.put(target,sharedRecord);
+        cleaner=new TargetCleanup.Cleaner(target);check(!cleaner.contents(identity,0)&&identity.get(target)==sharedRecord&&cleaner.retained>0,"target key deleted shared record");
+        var map=new HashMap<Object,Object>();map.put(target,"target");map.put(other,"other");other.id=target.id;
+        cleaner=new TargetCleanup.Cleaner(target);cleaner.contents(map,0);
+        check(map.entrySet().stream().anyMatch(e->e.getKey()==other&&e.getValue().equals("other")),"equal neighboring entity key removed");
+        var set=new HashSet<Object>();target.id=811;other.id=812;set.add(target);set.add(other);target.id=other.id;
+        cleaner=new TargetCleanup.Cleaner(target);check(!cleaner.contents(set,0)&&set.size()==2&&cleaner.retained>0,"mutable hash set removed an equal neighbor");target.id=811;
+        map=new HashMap<>();map.put("actual",target);map.put("neighbor",other);cleaner=new TargetCleanup.Cleaner(target);
+        check(cleaner.contents(map,0)&&map.size()==1&&map.get("neighbor")==other,"exact target value cleanup failed");
+        var concurrent=new java.util.concurrent.ConcurrentHashMap<Object,Object>();concurrent.put("actual",target);concurrent.put("neighbor",other);
+        check(new TargetCleanup.Cleaner(target).contents(concurrent,0)&&concurrent.size()==1&&concurrent.get("neighbor")==other,"concurrent identity value removal failed");
+        var data=new CleanupData();data.rows.put("target",target);data.rows.put("neighbor",other);data.history.add(target.uuid);
+        check(new TargetCleanup.Cleaner(target).savedData(data)&&data.isDirty()&&data.rows.get("neighbor")==other&&data.history.equals(List.of(target.uuid)),"SavedData exact removal damaged UUID history");
+        data.setDirty(false);check(!new TargetCleanup.Cleaner(target).savedData(data)&&!data.isDirty(),"unchanged SavedData was dirtied");
+        // Inaccessible metadata remains visible to classification and fails closed.
+        Field fields=TargetCleanup.class.getDeclaredField("FIELDS");fields.setAccessible(true);
+        ((ClassValue<Field[]>)fields.get(null)).get(CleanupRecord.class)[0].setAccessible(false);
+        Field get=TargetCleanup.class.getDeclaredField("CALLABLE");get.setAccessible(true);
+        cleaner=new TargetCleanup.Cleaner(target);var future=new java.util.concurrent.FutureTask<Void>(target,null);
+        if(!((Field)get.get(null)).trySetAccessible()) {check(cleaner.get((Field)get.get(null),future)==null&&cleaner.retained>0,"inaccessible field counted as absence");}
+        checkR23Records(target,other);
+        checkR23Tasks();
+        System.out.println("PRECISE_CLEANUP_PASS identity_keys_shared_records_capture_retained_known_records_source_dirty bounded_retry MODEL_NO_GAME");
+    }
+    private static byte[] cleanupImage(String name,String parent,String... fields) {
+        var writer=new ClassWriter(0);writer.visit(61,Opcodes.ACC_PUBLIC,name,null,parent,null);
+        for(int i=0;i<fields.length;i+=2)writer.visitField(Opcodes.ACC_PUBLIC,fields[i],fields[i+1],null,null).visitEnd();
+        writer.visitEnd();return writer.toByteArray();
+    }
+    private static void checkR23Records(EntityFixture original,EntityFixture other) throws Exception {
+        class SourceLoader extends java.security.SecureClassLoader {
+            Class<?> define(String name,byte[] bytes,java.net.URL location) {return defineClass(name,bytes,0,bytes.length,new java.security.CodeSource(location,(java.security.cert.Certificate[])null));}
+        }
+        var source=TargetGuardCheck.class.getProtectionDomain().getCodeSource().getLocation();var loader=new SourceLoader();
+        String targetName="fixture/ExecutedEntity",bossName="cn/blockforge/dyingsol/entity/BossIntegrityAgent$BossRecord",dataName="plz/lizi/supersteve/level/SSSaveData";
+        var targetType=loader.define(targetName.replace('/','.'),cleanupImage(targetName,org.objectweb.asm.Type.getInternalName(EntityFixture.class)),source);
+        var target=(EntityFixture)unsafe().allocateInstance(targetType);target.id=821;target.uuid=original.uuid;
+        var bossType=loader.define(bossName.replace('/','.'),cleanupImage(bossName,"java/lang/Object","uuid","Ljava/util/UUID;","entity","Lnet/minecraft/world/entity/Entity;"),source);
+        Object boss=unsafe().allocateInstance(bossType);bossType.getField("uuid").set(boss,target.uuid);
+        var rows=new ArrayList<Object>(List.of(boss));check(new TargetCleanup.Cleaner(target).contents(rows,0)&&rows.isEmpty(),"known BossRecord regression");
+        bossType.getField("entity").set(boss,other);rows.add(boss);check(!new TargetCleanup.Cleaner(target).contents(rows,0)&&rows.size()==1,"known record with another live entity removed");
+        var dataType=loader.define(dataName.replace('/','.'),cleanupImage(dataName,org.objectweb.asm.Type.getInternalName(CleanupData.class),"ssList","Lnet/minecraft/nbt/ListTag;","metadata","Lnet/minecraft/nbt/ListTag;"),source);
+        var data=(CleanupData)unsafe().allocateInstance(dataType);data.rows=new LinkedHashMap<>();data.history=new ArrayList<>();
+        var own=new net.minecraft.nbt.CompoundTag();own.putUUID("UUID",target.uuid);var unrelated=new net.minecraft.nbt.CompoundTag();unrelated.putUUID("UUID",UUID.randomUUID());
+        var list=new net.minecraft.nbt.ListTag();list.add(own);list.add(unrelated);var history=new net.minecraft.nbt.ListTag();history.add(own.copy());
+        dataType.getField("ssList").set(data,list);dataType.getField("metadata").set(data,history);
+        check(new TargetCleanup.Cleaner(target).savedData(data)&&list.size()==1&&list.get(0)==unrelated&&history.size()==1&&data.isDirty(),"known NBT cleanup crossed record field boundary");
+        data.rows.put("target",original);data.setDirty(false);
+        check(!new TargetCleanup.Cleaner(original).savedData(data)&&data.rows.get("target")==original&&!data.isDirty(),"different loader SavedData was modified");
+        var foreign=loader.define("fixture.ForeignData",cleanupImage("fixture/ForeignData",org.objectweb.asm.Type.getInternalName(CleanupData.class)),new java.net.URL("file:/different-mod.jar"));
+        var wrong=(CleanupData)unsafe().allocateInstance(foreign);wrong.rows=new LinkedHashMap<>();wrong.rows.put("target",target);wrong.history=new ArrayList<>();
+        check(!new TargetCleanup.Cleaner(target).savedData(wrong)&&wrong.rows.get("target")==target&&!wrong.isDirty(),"different source SavedData was modified");
+    }
+    private static void checkR23Tasks() throws Exception {
+        var target=cleanupTarget();Field callable=java.util.concurrent.FutureTask.class.getDeclaredField("callable");boolean accessible=callable.trySetAccessible();
+        var future=new java.util.concurrent.FutureTask<Void>(target,null);var cleaner=new TargetCleanup.Cleaner(target);cleaner.tasks(future);
+        check(future.isCancelled()==accessible,"task access boundary mismatch");
+        if(!accessible) {check(cleaner.retained>0,"closed JDK wrapper missing retained outcome");future.run();check(target.calls==1,"unreadable task behavior changed");}
+        else {future.run();check(target.calls==0,"cancelled target task ran");}
+        var capturing=new java.util.concurrent.FutureTask<Void>(()->{target.calls++;},null);cleaner=new TargetCleanup.Cleaner(target);cleaner.tasks(capturing);
+        check(!capturing.isCancelled()&&cleaner.retained>0,"captured lambda treated as exclusive task");
+        var custom=new java.util.concurrent.FutureTask<Void>(target,null) {public boolean cancel(boolean interrupt){throw new AssertionError("custom cancel must not be invoked");}};
+        cleaner=new TargetCleanup.Cleaner(target);cleaner.tasks(custom);check(cleaner.retained>0&&!custom.isCancelled(),"custom task was not retained");
+        var pool=new java.util.concurrent.ThreadPoolExecutor(1,1,1,java.util.concurrent.TimeUnit.SECONDS,new java.util.concurrent.LinkedBlockingQueue<>());
+        try {
+            var queued=new java.util.concurrent.FutureTask<Void>(target,null);var neighbor=new java.util.concurrent.FutureTask<Void>(()->{},null);
+            pool.getQueue().add(queued);pool.getQueue().add(neighbor);pool.getQueue().add(target);
+            cleaner=new TargetCleanup.Cleaner(target);cleaner.tasks(queued);cleaner.tasks(pool);
+            check(!pool.isShutdown()&&pool.getQueue().contains(neighbor)&&!neighbor.isCancelled(),"public executor or neighbor task changed");
+            check(pool.getQueue().stream().noneMatch(e->e==target),"bare target queue entry survived");
+            check(pool.getQueue().contains(queued)!=accessible,"known cancelled handle not unlinked on later pool discovery");
+        } finally {pool.shutdownNow();}
+        if(accessible) {
+            var callableTarget=(CallableEntityFixture)unsafe().allocateInstance(CallableEntityFixture.class);callableTarget.uuid=UUID.randomUUID();
+            var direct=new java.util.concurrent.FutureTask<Void>((java.util.concurrent.Callable<Void>)callableTarget);new TargetCleanup.Cleaner(callableTarget).tasks(direct);
+            check(direct.isCancelled(),"direct Callable receiver was missed");
+            var timer=new java.util.concurrent.ScheduledThreadPoolExecutor(1);
+            try {
+                var scheduled=timer.scheduleAtFixedRate(target,1,1,java.util.concurrent.TimeUnit.DAYS);var ordinary=timer.schedule(()->{},1,java.util.concurrent.TimeUnit.DAYS);
+                cleaner=new TargetCleanup.Cleaner(target);cleaner.tasks(timer);
+                check(scheduled.isCancelled()&&!timer.getQueue().contains(scheduled)&&!ordinary.isCancelled()&&!timer.isShutdown(),"scheduled target cleanup affected unrelated task");
+                check(timer.submit(()->7).get(3,java.util.concurrent.TimeUnit.SECONDS)==7,"executor stopped serving work");
+                target.started=new java.util.concurrent.CountDownLatch(1);target.release=new java.util.concurrent.CountDownLatch(1);
+                var running=new java.util.concurrent.FutureTask<Void>(target,null);Thread worker=new Thread(running,"r23-test-running");worker.start();
+                try {
+                    check(target.started.await(3,java.util.concurrent.TimeUnit.SECONDS),"target fixture did not start");new TargetCleanup.Cleaner(target).tasks(running);
+                    check(running.isCancelled()&&worker.isAlive()&&!target.interrupted,"running task was interrupted or claimed drained");
+                } finally {target.release.countDown();worker.join(3000);check(!worker.isAlive(),"fixture did not exit");}
+            } finally {timer.shutdownNow();check(timer.awaitTermination(3,java.util.concurrent.TimeUnit.SECONDS),"timer fixture did not exit");}
+        }
+        System.out.println("PRECISE_TASKS_PASS wrapperAccess="+accessible+" exact_receiver_capture_retained_pool_alive_no_interrupt MODEL_NO_GAME");
+    }
+
     public static void main(String[] args) throws Exception {
+        if(args.length==1 && args[0].equals("cleanup-tasks")) {
+            net.minecraft.SharedConstants.tryDetectVersion();set(null,net.minecraft.server.Bootstrap.class,"isBootstrapped",true);
+            net.minecraft.core.registries.BuiltInRegistries.bootStrap();net.minecraftforge.registries.GameData.vanillaSnapshot();
+            checkR23Tasks();return;
+        }
         // Every production callback must match a real official-name Minecraft method.
         for(var method:OwnerSafetyHooks.class.getDeclaredMethods()) for(AsmHook hook:method.getAnnotationsByType(AsmHook.class)) {
             HookDefinition.from(hook,method);
@@ -738,6 +904,7 @@ public final class TargetGuardCheck {
         checkRenderAndHierarchy();
         checkR20Events();
         checkR20Entrypoints();
+        checkR23Cleanup();
         System.out.println("TARGET_GUARDS_PASS owner_raw_motion_repair r16_ready_clone session_isolation attribute_index write_guards section_repair retry_budget indexed_residuals unload_barrier native_tick_swap identity_snapshot_no_auth bounded_weapon_scan new_instance scope_normal scope_throw production_hook_targets exact_identity_index startup_prepare_without_native left_swing_geometry attack_and_swing_before_cancel repeat_weave_once owner_session_localchannel fakeplayer multipart_cycle cursor_transfer_weapon_recovery entry_uuid MODEL_NO_GAME");
     }
 }

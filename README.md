@@ -2,10 +2,10 @@
 
 公开开发仓库：[Scorn522/Scorn-Secret](https://github.com/Scorn522/Scorn-Secret)。本地维护者 Scorn；上游作者署名及各组件许可证保留。
 
-当前本地候选：[Secret-4.3-local-test-r22.jar](build/libs/Secret-4.3-local-test-r22.jar)（1,572,992 字节，89 个业务类）。r22 完成选定边界内的 Native 安全恢复与动态事件桥接保护；完整构建、离线模型及两套 Java 独立启动通过。未部署、未启动游戏、未提交推送；最近已同步成品仍为 [r20](releases/Secret-4.3-local-test-r20.jar)。
+当前本地候选：[Secret-4.3-local-test-r23.jar](build/libs/Secret-4.3-local-test-r23.jar)（1,585,040 字节，89 个业务类）。r23 完成第 4 部分首批精准清理：实例引用、可证明任务、同源持久化记录及部分完成状态。完整构建、Java 回归、Native 退出与两套 Java 独立启动通过；未知捕获和不可读任务保留。未部署、未启动游戏、未提交推送；最近已同步成品仍为 [r20](releases/Secret-4.3-local-test-r20.jar)。
 
 
-基于 `Secret-4.3-local-test-r2`，固定开发目录为 `D:\桌面\Secret-4.3-dev`。版本 `4.3-local-test-r22`，保留原 Mod ID、Java/JNI 命名与资源。原始下载源码及独立 Scorn Secret 工程没有覆盖。
+基于 `Secret-4.3-local-test-r2`，固定开发目录为 `D:\桌面\Secret-4.3-dev`。版本 `4.3-local-test-r23`，保留原 Mod ID、Java/JNI 命名与资源。原始下载源码及独立 Scorn Secret 工程没有覆盖。
 
 ## 本批行为
 
@@ -22,7 +22,7 @@
 ## 构建
 
 设置 JDK17 的 `JAVA_HOME`，Python 和 Zig 0.13.0 可分别用 `HIMITSU_PYTHON`、`HIMITSU_ZIG` 指定，然后执行 `./gradlew.bat build --console=plain`。
-默认仅编译、离线检查和打包，不启动游戏、部署或上传。最终包为 `build/libs/Secret-4.3-local-test-r22.jar`，不要安装 intermediate JAR。原 r2 的本地开发配置和退出协调修复保留。
+默认仅编译、离线检查和打包，不启动游戏、部署或上传。最终包为 `build/libs/Secret-4.3-local-test-r23.jar`，不要安装 intermediate JAR。原 r2 的本地开发配置和退出协调修复保留。
 
 ## 证据与边界
 
@@ -367,3 +367,26 @@ build-r14-final.log 完整构建成功（36 秒，24 项任务：11 项执行、
 本批完成的是用户选定的“可证明范围内恢复”，没有实现任意并发本机代码修复，也不保证任意内存破坏后进程仍可继续运行。静态上减少了巡检唤醒与重复扫描，并移除危险写入；未测量 FPS、实机攻防、画面、换世界或保存退出，不宣称实际提速。本轮未部署、未启动 Minecraft、未提交或推送。
 
 最终包 `build/libs/Secret-4.3-local-test-r22.jar`：**1,572,992 字节**，**89 个业务类**，保留模块描述，低于 2 MB。仅含生产 himitsu.dll，未打入检查类、测试 DLL/EXE、脚本或日志。SHA-256：`E750FAAAB0769061A90C6B3952C162CD0948E1D449D3571DF7E4F309731F08F5`。r13 攻击/挥击文件 SHA-256 仍为 `05F0CA04266AA07F7B38487908EE880F057CDB586D40531BF9049D3DC843974F`。
+
+
+## r23 第四部分首批：精准清理与来源解绑（2026-11-06）
+
+起止 HEAD 均为 `7a97dd1`，以 r22 未提交工作区继续，原 28 个已修改文件和未跟踪 CFR 保留，起始差异存于 `.work/r22-before-r23.patch`。本批仅调整既有 TargetCleanup、EventBusTakeover、TargetGuardCheck、构建接线和本文；没有新增生产文件、类型或协议。Native 源码差异摘要与起始值一致，r13 攻击/挥击摘要保持 `05F0CA04266AA07F7B38487908EE880F057CDB586D40531BF9049D3DC843974F`。
+
+- **精确引用与旧逻辑退出**：静态字段沿实际类层级只访问一次，删除重复继承扫描；不可访问字段保留为未知。移除“包装器直接引用目标就删除整个包装器”的通用判定，保留包装器及其他成员，仅按原边界断开可写的精确目标引用。补齐目标作为 Map 键的处理，核对键、值和标准容器；拒绝共享记录、变化中的引用及可变实体 ID 导致的相等歧义。并发 Map 使用值身份核对，未知容器保留，不建立同步代理。
+- **监听器**：仍仅摘除原始登记键就是目标的独占分派监听器；同源 Lambda/内部类捕获只能形成候选，不能授权注销。区分分派摘除与原始索引残留，稳定残留不再反复重扫。普通 post 路径未修改。独立启动检查发现新方法签名提前解析未加载 Cleaner，已将既有冷路径上下文移出早期反射方法签名，不扩大加载或扫描范围。
+- **任务**：仅从目标现有字段和实际类层级静态字段定位句柄/执行器。识别实际接收者就是目标的原生 FutureTask、RunnableAdapter 和 JDK 定时任务，使用 cancel(false)，仅移除同一队列对象；公共线程池和无关任务继续运行。自定义包装、捕获型 Lambda、不可读 JDK 字段保留；不加游戏 add-opens、不引入 Unsafe/Native 读取旁路，不中断已经执行的调用。
+- **SavedData**：限定当前实际世界缓存及可确认同加载器、同来源的数据。只改精确实例关系与已有专用记录规则；SuperSteve NBT UUID 规则进一步限定实际 ssList 字段，不误删同文件其他 UUID 元数据。未知 UUID/历史记录不删除，发生修改才标脏，部分修改后发生异常仍保留正确脏标记。
+- **重试与成本**：暂时并发变化沿用每 20 Tick、最多三次的既有重试；确定无法证明的对象保持 incomplete/exhausted，等待再次明确命中才复核。卸载清除对应状态与队列。没有新增每帧/每 Tick 全表扫描、查栈、JNI 或线程池巡检。处决冷路径增加有限来源/任务核对，未测量 FPS 或实际性能提升。
+
+验收分级：
+
+- 首轮实际编译 Java 和配套 r23 Native DLL，并执行 checkNativeShutdown：恢复范围、Hook 元数据、正常排空、调用超时、引用读者超时均通过。Native 生产源码未改，DLL 因 HSP3 版本绑定重建。首次新增任务夹具缺注册表初始化，修复夹具后保留原断言；随后修复上述真实早期加载依赖。
+- 最终完整构建 `.work/r23-final-build.log` 成功：35 秒，28 项任务（14 执行、14 复用）。Java 重编，Native 与退出模型复用本轮已通过结果；Forge 登记、桥接、包绑定、Java/目标守卫回归和最终包校验通过。标准 test 为 NO-SOURCE，实际检查来自既有 check 任务及新增的独立任务访问场景。
+- 默认检查 JVM 验证封闭 JDK 字段时保留；另一个仅用于检查的 JVM 开放 java.util.concurrent，验证准确接收者取消、公共池可继续工作及运行中任务不被中断。该开放参数只在 checkTargetCleanupAccess，不进入游戏运行配置或 JAR。
+- 补充登记替换和世界卸载检查后，`.work/r23-final-guards2.log` 成功：46 秒，9 项任务（3 执行、6 复用）。覆盖同 ID 不同对象、共享包装/监听器、同 UUID 历史、异加载器/异来源 SavedData、已知记录回归、不可访问元数据、有限重试、再次命中和卸载。补充夹具的一处局部变量重名已修复；生产逻辑未再改变。
+- 构建 JDK 与 PCL Java 的独立 checkNativeStartup 均 ExitCode=0；最终 PCL 记录 `.work/r23-final-pcl.log` 成功：28 秒，20 项任务（6 执行、14 复用），复用同一生产 DLL。包绑定、SourceShield、动态桥接重定义/句柄修复、并发回调、线程保护、320 环境链及正常关闭通过。检查总线 shutdown 的 FATAL 栈是 Forge 夹具诊断，不是游戏崩溃。
+
+最终 `build/libs/Secret-4.3-local-test-r23.jar` 为 **1,585,040 字节**，**89 个业务类**，保留模块描述；SHA-256：`D88ACDE41B0E26CEA424B28EDFE84B9B43C41DB5D887361128BE5BD3AE91C8CD`。只含生产 himitsu.dll，未加入检查类、测试 DLL/EXE、脚本或日志。mods 目录仍为 r20，本轮没有写入部署目录。
+
+本批不宣称所有未知复活来源已解绑：捕获关系不证明独占职责，不可读/自定义任务保持原行为，已执行回调不会被撤回，歧义索引可能仍保留目标引用。第 4 部分的退出、Attach/进程、低层线程、提前引导和发布期收敛不在本批。实机攻防、画面/FPS、存档与保存退出均未执行；未提交、未推送。

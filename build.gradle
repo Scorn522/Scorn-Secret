@@ -5,7 +5,7 @@ plugins {
     id 'net.minecraftforge.gradle' version '[6.0,6.2)'
 }
 
-version = '4.3-local-test-r22'
+version = '4.3-local-test-r23'
 group = 'com.himitsu.secret'
 
 base {
@@ -479,6 +479,16 @@ tasks.register('checkTargetGuards', JavaExec) {
     jvmArgs '-Xverify:all'
 }
 tasks.named('check').configure { dependsOn tasks.named('checkTargetGuards') }
+// Test JVM only: ordinary checkTargetGuards verifies the closed-module refusal path.
+tasks.register('checkTargetCleanupAccess', JavaExec) {
+    dependsOn tasks.named('checksClasses')
+    classpath = sourceSets.checks.runtimeClasspath
+    mainClass = 'com.himitsu.secret.core.TargetGuardCheck'
+    args 'cleanup-tasks'
+    jvmArgs '-Xverify:all', '--add-opens=java.base/java.util.concurrent=ALL-UNNAMED'
+}
+tasks.named('check').configure { dependsOn tasks.named('checkTargetCleanupAccess') }
+
 
 tasks.register('checkNativeBootstrap', JavaExec) {
     dependsOn tasks.named('checksClasses'), tasks.named('localJar')
