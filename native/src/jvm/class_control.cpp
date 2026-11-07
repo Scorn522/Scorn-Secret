@@ -224,9 +224,10 @@ bool initialize_class_control(JavaVM*, jvmtiEnv*) {
     }
     jvmtiEventCallbacks callbacks{};
     callbacks.ClassFileLoadHook = class_file_load_hook;
+    callbacks.ThreadEnd=[](jvmtiEnv*,JNIEnv* env,jthread thread) { himitsu::platform::windows::retire_host_thread(env,thread); };
     const jvmtiError callback_error = trusted_set_event_callbacks(&callbacks, sizeof(callbacks));
     HIMITSU_LOG_INFO("ClassControl", "SetEventCallbacks 调用结束（jvmti=%d）", callback_error);
-    return callback_error == JVMTI_ERROR_NONE;
+    return callback_error == JVMTI_ERROR_NONE && trusted_set_event_notification_mode(JVMTI_ENABLE,JVMTI_EVENT_THREAD_END,nullptr)==JVMTI_ERROR_NONE;
 }
 
 jobject take_exception(JNIEnv* env) {
@@ -694,6 +695,11 @@ jobject protect_thread(JNIEnv* env,jobject thread) {
     return success?boolean_value(env,true):new_exception(env,"java/lang/IllegalStateException","Thread protection was not published: runtime stopping");
 }
 jobject unprotect_thread(JNIEnv* env,jobject thread) {
+    {
+        core::RuntimeState::ReferenceRead read(core::RuntimeState::instance(),env);
+        for(jobject core:read->host_threads)if(core && env->IsSameObject(thread,core))
+            return new_exception(env,"java/lang/SecurityException","Core thread protection belongs to its lifecycle");
+    }
     if(!thread) return new_exception(env,"java/lang/IllegalArgumentException","UnprotectThread requires Thread");
     auto& state=core::RuntimeState::instance();
     while(!state.shutting_down()) {

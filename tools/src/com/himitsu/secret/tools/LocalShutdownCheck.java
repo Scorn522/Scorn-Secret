@@ -36,10 +36,10 @@ public final class LocalShutdownCheck {
         try { invoke(command,"status",new Object[0]);throw new AssertionError("late command entered JNI"); }
         catch(IllegalStateException expected) {}
         invoke(shutdown);release.countDown();closer.join(5000);
-        if(closer.isAlive()||failure.get()!=null||loaded.getBoolean(null)||!calls.equals(List.of("UnprotectThread","Shutdown")))
+        if(closer.isAlive()||failure.get()!=null||loaded.getBoolean(null)||!calls.equals(List.of("HostShutdown","UnprotectThread","Shutdown")))
             throw new AssertionError("shutdown order/count/state changed: "+calls,failure.get());
         invoke(shutdown);
-        if(calls.size()!=2)throw new AssertionError("duplicate native shutdown");
+        if(calls.size()!=3)throw new AssertionError("duplicate native shutdown");
         System.out.println("JAVA_SHUTDOWN_PASS cleanup_before_native late_call_refused duplicate_shutdown_noop MODEL_NO_DLL");
     }
 }

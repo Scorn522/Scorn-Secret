@@ -2,6 +2,7 @@
 
 #include "himitsu/core/native_log.hpp"
 #include "himitsu/core/runtime_state.hpp"
+#include "himitsu/platform/windows/thread_guard.hpp"
 #include "himitsu/jvm/class_control.hpp"
 #include "himitsu/jvm/source_images.hpp"
 #include "himitsu/platform/windows/swap_buffers_hook.hpp"
@@ -162,6 +163,8 @@ jobject dispatch_command(JNIEnv* env, jstring command_value, jobjectArray argume
         return himitsu::jvm::take_exception(env);
     }
 
+    if (command == "HostInstall" || command == "HostPolicy" || command == "HostLifecycle" || command == "HostDenied" || command == "HostShutdown")
+        return himitsu::platform::windows::host_command(env,command.c_str(),argument(env,arguments,0),argument(env,arguments,1));
     if (command == "Configure") {
         auto game_dir = static_cast<jstring>(argument(env, arguments, 0));
         auto mod_path = static_cast<jstring>(argument(env, arguments, 1));
@@ -379,6 +382,8 @@ jobject dispatch_command(JNIEnv* env, jstring command_value, jobjectArray argume
         return himitsu::jvm::render_frame(env, before, stage, context);
     }
     if (command == "Shutdown") {
+        if(!himitsu::platform::windows::host_shutdown_authorized())
+            return himitsu::jvm::new_exception(env,"java/lang/SecurityException","Authenticated shutdown hook required");
         if (!RuntimeState::instance().shutdown(env)) {
             return himitsu::jvm::new_exception(env, "java/lang/IllegalStateException", "Native shutdown incomplete; resources retained; see native log for callback, worker, hook or deadline failure");
         }

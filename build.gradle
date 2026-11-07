@@ -5,7 +5,7 @@ plugins {
     id 'net.minecraftforge.gradle' version '[6.0,6.2)'
 }
 
-version = '4.3-local-test-r23-fix1'
+version = '4.3-local-test-r24'
 group = 'com.himitsu.secret'
 
 base {
@@ -168,6 +168,7 @@ def nekoOutputJar = layout.buildDirectory.file("neko/Secret-${project.version}-n
 def nekoMapping = layout.buildDirectory.file("neko/Secret-${project.version}-neko.jar.map")
 def finalJar = layout.buildDirectory.file("libs/Secret-${project.version}.jar")
 def obfuscatedJar = layout.buildDirectory.file("libs/Secret-${project.version}-obfuscated.jar")
+def releaseJar = layout.buildDirectory.file("libs/Secret-${project.version}-release.jar")
 def encryptionOnlyMapping = layout.buildDirectory.file('secure/encryption-only.map')
 def encryptionOnlyJar = layout.buildDirectory.file("libs/Secret-${project.version}-encrypted-only.jar")
 // Local build keys are generated once by configureNative and are never published.
@@ -190,7 +191,7 @@ tasks.register('compileSecureTool', JavaCompile) {
 
 tasks.register('buildNekoCli', Exec) {
     workingDir nekoRoot
-    commandLine 'cmd', '/c', 'gradlew.bat', ':neko-cli:installDist', '--console=plain'
+    commandLine 'cmd', '/c', 'gradlew.bat', ':neko-cli:installDist', '--offline', '--console=plain', '--no-daemon'
     inputs.files fileTree(nekoRoot) {
         include '**/*.java', '**/*.kt', '**/*.kts', 'gradle.properties', 'gradle/libs.versions.toml'
         exclude '**/build/**', '.gradle/**'
@@ -275,7 +276,7 @@ tasks.register('secureJar', JavaExec) {
         def secrets = releaseSecrets()
         setArgs([
             nekoOutputJar.get().asFile.absolutePath,
-            finalJar.get().asFile.absolutePath,
+            releaseJar.get().asFile.absolutePath,
             nekoMapping.get().asFile.absolutePath,
             secrets.outer,
             secrets.class,
@@ -284,7 +285,7 @@ tasks.register('secureJar', JavaExec) {
     }
     inputs.file nekoOutputJar
     inputs.file nekoMapping
-    outputs.file finalJar
+    outputs.file releaseJar
     outputs.upToDateWhen { false }
 }
 
@@ -329,10 +330,10 @@ tasks.register('secureJarEncryptionOnly', JavaExec) {
 tasks.register('verifyPackagedNative') {
     dependsOn tasks.named('secureJar'), tasks.named('secureJarEncryptionOnly'), tasks.named('publishObfuscatedJar')
     inputs.file preparedNativeResource
-    inputs.files finalJar, obfuscatedJar, encryptionOnlyJar
+    inputs.files releaseJar, obfuscatedJar, encryptionOnlyJar
     doLast {
         byte[] expected = preparedNativeResource.asFile.bytes
-        [finalJar.get().asFile, obfuscatedJar.get().asFile, encryptionOnlyJar.get().asFile].each { jarFile ->
+        [releaseJar.get().asFile, obfuscatedJar.get().asFile, encryptionOnlyJar.get().asFile].each { jarFile ->
             def zip = new java.util.zip.ZipFile(jarFile)
             try {
                 def entry = zip.getEntry('himitsu.dll')
@@ -512,7 +513,7 @@ tasks.register('bridgeCheckAgent', Jar) {
     dependsOn tasks.named('checksClasses')
     archiveFileName = 'bridge-check-agent.jar'
     destinationDirectory = layout.buildDirectory.dir('checks')
-    from(sourceSets.checks.output) { include 'com/himitsu/secret/bridge/BridgeBindingCheck*.class' }
+    from(sourceSets.checks.output)
     manifest { attributes 'Premain-Class': 'com.himitsu.secret.bridge.BridgeBindingCheck' }
 }
 tasks.register('checkBridgeBinding', JavaExec) {
@@ -529,11 +530,20 @@ tasks.named('check').configure { dependsOn tasks.named('checkBridgeBinding') }
 // Kept separate from ordinary model checks because it changes this check JVM's agents.
 tasks.register('checkNativeStartup', JavaExec) {
     timeout = java.time.Duration.ofSeconds(45)
-    dependsOn tasks.named('bridgeCheckAgent'), tasks.named('localJar'), tasks.named('compileBridgeBindingCheck')
-    classpath = files(finalJar, secureToolOutput) + sourceSets.checks.output + configurations.runtimeClasspath
+    dependsOn tasks.named('bridgeCheckAgent'), tasks.named('compileBridgeBindingCheck'), tasks.named('compileSecureTool')
+    def existing = providers.gradleProperty('smokeJar')
+    def candidate = existing.isPresent() ? file(existing.get()) : (providers.gradleProperty('releaseCheck').isPresent() ? releaseJar : finalJar).get().asFile
+    if(!existing.isPresent()) dependsOn tasks.named('localJar')
+    classpath = files(candidate, secureToolOutput, layout.buildDirectory.file('checks/bridge-check-agent.jar')) + sourceSets.checks.output + configurations.runtimeClasspath
     mainClass = 'com.himitsu.secret.bridge.NativeStartupCheck'
     jvmArgs '-Xverify:all', "-javaagent:${layout.buildDirectory.file('checks/bridge-check-agent.jar').get().asFile.absolutePath}"
-    args finalJar.get().asFile.absolutePath, layout.projectDirectory.dir('.work/r7-native-startup').asFile.absolutePath, layout.buildDirectory.file('bridge-binding-check.dll').get().asFile.absolutePath, localKeys.get().asFile.absolutePath
+    args candidate.absolutePath, layout.projectDirectory.dir('.work/r24-native-startup').asFile.absolutePath, layout.buildDirectory.file('bridge-binding-check.dll').get().asFile.absolutePath, localKeys.get().asFile.absolutePath
+    if (!existing.isPresent() && providers.gradleProperty('releaseCheck').isPresent()) dependsOn tasks.named('secureJar')
+    doFirst { delete layout.projectDirectory.file('.work/r24-native-startup/exit.ok').asFile }
+    doLast {
+        def proof=layout.projectDirectory.file('.work/r24-native-startup/exit.ok').asFile
+        if(!proof.isFile() || proof.text.trim()!='PASS') throw new GradleException('Actual JVM shutdown hook did not complete')
+    }
     if (providers.gradleProperty('smokeJava').isPresent()) executable = providers.gradleProperty('smokeJava').get()
     if (providers.gradleProperty('bridgeConflict').isPresent()) jvmArgs '-Dsecret.check.bridgeConflict=true'
 }

@@ -23,10 +23,27 @@ public final class EarlyBootstrapService extends net.minecraftforge.fml.loading.
         if(!java.nio.file.Files.isRegularFile(archive)) throw new IllegalStateException("Secret archive missing: "+archive);
         return java.util.stream.Stream.of(archive);
     }
-    @Override public void onLoad(IEnvironment environment, Set<String> services) {}
+    @Override public void onLoad(IEnvironment environment, Set<String> services) {
+        Path directory=environment.getProperty(IEnvironment.Keys.GAMEDIR.get()).orElse(null);
+        if(directory==null) {
+            String[] args=ProcessHandle.current().info().arguments().orElse(new String[0]);
+            for(int i=0;i<args.length;i++) if(args[i].equals("--gameDir") || args[i].startsWith("--gameDir=")) {
+                if(directory!=null) return;
+                String value;
+                if(args[i].equals("--gameDir")) {if(i+1==args.length||args[i+1].startsWith("--"))return;value=args[++i];}
+                else value=args[i].substring(10);
+                if(value.isBlank())return;
+                try {directory=Path.of(value);}catch(java.nio.file.InvalidPathException invalid){return;}
+            }
+        }
+        if(directory!=null) loadEarly(directory);
+    }
     @Override public List<ITransformer> transformers() { return List.of(); }
     @Override public void initialize(IEnvironment environment) {
-        Path directory = environment.getProperty(IEnvironment.Keys.GAMEDIR.get()).orElse(Path.of("."));
+        Path directory=environment.getProperty(IEnvironment.Keys.GAMEDIR.get()).orElse(null);
+        if(directory!=null) loadEarly(directory);
+    }
+    private void loadEarly(Path directory) {
         try {
             // PCL may keep LWJGL on the class path instead of a named boot module.
             getClass().getModule().addReads(Class.forName("org.lwjgl.system.Library",false,getClass().getClassLoader()).getModule());

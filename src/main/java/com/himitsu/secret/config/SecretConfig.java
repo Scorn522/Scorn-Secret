@@ -38,7 +38,18 @@ public record SecretConfig(
     public void save(Path gameDirectory) throws IOException {
         Path path = configPath(gameDirectory);
         Files.createDirectories(path.getParent());
-        Files.writeString(path, template(), StandardCharsets.UTF_8);
+        // Preserve startup-only process grants when saving unrelated UI options.
+        Properties saved=new Properties();
+        if(Files.isRegularFile(path)) try(var reader=Files.newBufferedReader(path,StandardCharsets.UTF_8)) { saved.load(reader); }
+        saved.setProperty(CLASS_DEFENSE,classDefense);
+        saved.setProperty(JVMTI_DISABLE,Boolean.toString(jvmtiDisable));
+        Path temporary=Files.createTempFile(path.getParent(),"secret-", ".tmp");
+        try {
+            try(var writer=Files.newBufferedWriter(temporary,StandardCharsets.UTF_8)) { saved.store(writer,"Process grants are loaded only at startup; empty allowlist denies child processes."); }
+            try(var channel=java.nio.channels.FileChannel.open(temporary,java.nio.file.StandardOpenOption.WRITE)) { channel.force(true); }
+            try { Files.move(temporary,path,java.nio.file.StandardCopyOption.ATOMIC_MOVE,java.nio.file.StandardCopyOption.REPLACE_EXISTING); }
+            catch(java.nio.file.AtomicMoveNotSupportedException unavailable) { Files.move(temporary,path,java.nio.file.StandardCopyOption.REPLACE_EXISTING); }
+        } finally { Files.deleteIfExists(temporary); }
     }
 
     private static Path configPath(Path gameDirectory) {

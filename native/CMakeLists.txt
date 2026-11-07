@@ -261,7 +261,8 @@ if(HIMITSU_MSVC_FRONTEND)
         PROPERTIES COMPILE_OPTIONS "/W0"
     )
 else()
-    target_compile_options(himitsu PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(himitsu PRIVATE -Wall -Wextra -Wpedantic "-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=native" "-ffile-prefix-map=${CMAKE_BINARY_DIR}=build" -g0)
+    target_link_options(himitsu PRIVATE -Wl,--strip-debug)
 endif()
 
 set_target_properties(himitsu PROPERTIES

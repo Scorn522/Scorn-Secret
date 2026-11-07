@@ -79,6 +79,9 @@ bool holds_ref(const RuntimeState::References& refs,jobject value) {
     for(jobject ref:{static_cast<jobject>(refs.transformer),static_cast<jobject>(refs.render),static_cast<jobject>(refs.bootstrap),
             static_cast<jobject>(refs.cleanup_reader),static_cast<jobject>(refs.event_installer),static_cast<jobject>(refs.event_bridge),static_cast<jobject>(refs.event_bus),
             static_cast<jobject>(refs.event_array_type),refs.game_loader,refs.event_loader,refs.event_handles[0],refs.event_handles[1]})if(ref==value)return true;
+    for(jobject ref:{static_cast<jobject>(refs.host_hooks[0]),static_cast<jobject>(refs.host_hooks[1]),static_cast<jobject>(refs.host_hooks[2]),
+            refs.shutdown_hook,refs.host_objects[0],refs.host_objects[1],refs.host_threads[0],refs.host_threads[1]}) if(ref==value) return true;
+    for(jobject ref:refs.exit_denials) if(ref==value) return true;
     for(const auto& thread:refs.threads) if(thread.java_thread==value) return true;
     return false;
 }
@@ -103,7 +106,7 @@ bool RuntimeState::publish_references(const References* expected,std::unique_ptr
     if((shutting_down() && !retiring) || references_.load(std::memory_order_seq_cst)!=expected) return false;
     // Reserve before publishing; allocation failure must leave the previous snapshot intact.
     retired_snapshots_.reserve(retired_snapshots_.size()+1);
-    retired_refs_.reserve(retired_refs_.size()+expected->threads.size()+12);
+    retired_refs_.reserve(retired_refs_.size()+expected->threads.size()+expected->exit_denials.size()+24);
     retired_handles_.reserve(retired_handles_.size()+expected->threads.size());
     auto retire_ref=[&](jobject value) {
         if(value && !holds_ref(*next,value) && std::find(retired_refs_.begin(),retired_refs_.end(),value)==retired_refs_.end()) retired_refs_.push_back(value);
@@ -111,6 +114,9 @@ bool RuntimeState::publish_references(const References* expected,std::unique_ptr
     for(jobject ref:{static_cast<jobject>(expected->transformer),static_cast<jobject>(expected->render),static_cast<jobject>(expected->bootstrap),
             static_cast<jobject>(expected->cleanup_reader),static_cast<jobject>(expected->event_installer),static_cast<jobject>(expected->event_bridge),static_cast<jobject>(expected->event_bus),
             static_cast<jobject>(expected->event_array_type),expected->game_loader,expected->event_loader,expected->event_handles[0],expected->event_handles[1]})retire_ref(ref);
+    for(jobject ref:{static_cast<jobject>(expected->host_hooks[0]),static_cast<jobject>(expected->host_hooks[1]),static_cast<jobject>(expected->host_hooks[2]),
+            expected->shutdown_hook,expected->host_objects[0],expected->host_objects[1],expected->host_threads[0],expected->host_threads[1]})retire_ref(ref);
+    for(jobject ref:expected->exit_denials)retire_ref(ref);
     for(const auto& thread:expected->threads) {
         retire_ref(thread.java_thread);
         if(thread.os_thread && !holds_handle(*next,thread.os_thread)

@@ -8,6 +8,79 @@ import java.time.Duration;
 public final class NativeStartupCheck {
     private static final java.util.Map<String,byte[]> authenticated=new java.util.LinkedHashMap<>();
     private static volatile boolean nestedDumpRequested;
+    private static volatile boolean allChecksPassed,exitReaderRun;
+    private static Thread exitReader;
+    private static volatile Throwable exitReaderFailure;
+    private static native int ntThread(long handle,boolean terminate);
+    private static native boolean selfEndDenied(boolean nt);
+    private static native long nativeCreate(String program,String arguments,boolean ansi);
+    private static native int directAttach();
+    private static native long shellCreate(String program,String arguments);
+    private static native void installFailureProbe();
+    private static String sha(Path path) throws Exception {return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(java.nio.file.Files.readAllBytes(path)));}
+    private static void prepareHostPolicy(Path directory,Path probeDll) throws Exception {
+        var config=new java.util.Properties();Path source=Path.of(NativeStartupCheck.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+        Path command=Path.of(System.getenv("SystemRoot"),"System32/cmd.exe");
+        for(String kind:new String[]{"java","native","shell"}) {
+            String key="process.allow."+kind+".";Path origin=kind.equals("java")?source:probeDll;
+            config.setProperty(key+"kind",kind);config.setProperty(key+"source",origin.toString());config.setProperty(key+"sourceSha256",sha(origin));
+            config.setProperty(key+"program",command.toString());config.setProperty(key+"programSha256",sha(command));config.setProperty(key+"arguments","/d /c exit 0");
+            config.setProperty(key+"directory",Path.of("").toAbsolutePath().toString());
+            if(kind.equals("shell")) {config.setProperty(key+"verb","open");config.setProperty(key+"target",command.toString());config.setProperty(key+"childArguments","/d /c exit 0");}
+        }
+        java.nio.file.Files.createDirectories(directory.resolve("config"));
+        try(var writer=java.nio.file.Files.newBufferedWriter(directory.resolve("config/secret.config"))) {config.store(writer,"Disposable host guard check only");}
+    }
+    private static void attachHelper(String[] args) throws Exception {
+        Path ready=Path.of(args[2]),done=Path.of(args[3]);long until=System.nanoTime()+30_000_000_000L;
+        while(!java.nio.file.Files.exists(ready)&&System.nanoTime()<until)Thread.sleep(20);
+        if(!java.nio.file.Files.exists(ready))throw new AssertionError("Attach probe never received ready signal");
+        try {
+            var vm=com.sun.tools.attach.VirtualMachine.attach(args[1]);
+            try {vm.getSystemProperties();throw new AssertionError("Runtime Attach operation was accepted");}
+            finally {vm.detach();}
+        } catch(java.io.IOException expected) {
+            java.nio.file.Files.writeString(done,"PASS");System.out.println("EXTERNAL_ATTACH_DENIED_PASS");
+        } catch(InternalError disabled) {
+            // Windows libattach reports HotSpot ATTACH_ERROR_DISABLED (100) as InternalError.
+            if(disabled.getMessage()==null || !disabled.getMessage().endsWith("(100)"))throw disabled;
+            java.nio.file.Files.writeString(done,"PASS");System.out.println("EXTERNAL_ATTACH_DENIED_PASS status=100");
+        }
+    }
+    private static void verifyHostPolicy() throws Exception {
+        try {System.exit(73);throw new AssertionError("System.exit accepted");}catch(SecurityException expected) {}
+        try {Runtime.getRuntime().halt(74);throw new AssertionError("Runtime.halt accepted");}catch(SecurityException expected) {}
+        try {SecretNative.shutdown();throw new AssertionError("Direct shutdown accepted");}
+        catch(IllegalStateException expected) {check(rootCause(expected) instanceof SecurityException,"Wrong shutdown refusal");}
+        check(SecretNative.isLoaded(),"Unauthorized shutdown disarmed the runtime");
+        for(String command:new String[]{"HostShutdown","Shutdown","HostLifecycle","HostInstall","HostPolicy"}) {
+            try {SecretNative.invokeChecked(command);throw new AssertionError("Unauthenticated "+command+" accepted");}
+            catch(IllegalStateException expected){check(rootCause(expected) instanceof SecurityException,"Wrong command refusal: "+command);}
+        }
+        check(selfEndDenied(false)&&selfEndDenied(true),"Self process termination accepted");check(directAttach()==100,"Attach status did not explicitly refuse");
+        String executable=Path.of(System.getenv("SystemRoot"),"System32/cmd.exe").toString();
+        var child=new ProcessBuilder(executable,"/d","/c","exit","0").start();check(child.waitFor()==0,"Exact Java allowlist operation failed");
+        try {new ProcessBuilder(executable,"/d","/c","exit","1").start();throw new AssertionError("Mismatched process arguments accepted");}catch(java.io.IOException expected) {}
+        check(nativeCreate(executable,"/d /c exit 0",false)==1,"Exact Unicode native process grant failed");
+        check(nativeCreate(executable,"/d /c exit 0",true)==1,"Exact ANSI native process grant failed");
+        check(nativeCreate(executable,"/d /c exit 1",false)==-5,"Native parameter mismatch accepted");
+        var writer=new org.objectweb.asm.ClassWriter(org.objectweb.asm.ClassWriter.COMPUTE_MAXS);
+        writer.visit(61,org.objectweb.asm.Opcodes.ACC_PUBLIC,"r24/check/ForgedOrigin",null,"java/lang/Object",null);
+        var method=writer.visitMethod(org.objectweb.asm.Opcodes.ACC_PUBLIC|org.objectweb.asm.Opcodes.ACC_STATIC,"start","(Ljava/lang/String;)Ljava/lang/Process;",null,null);method.visitCode();
+        method.visitTypeInsn(org.objectweb.asm.Opcodes.NEW,"java/lang/ProcessBuilder");method.visitInsn(org.objectweb.asm.Opcodes.DUP);
+        method.visitInsn(org.objectweb.asm.Opcodes.ICONST_5);method.visitTypeInsn(org.objectweb.asm.Opcodes.ANEWARRAY,"java/lang/String");
+        for(int i=0;i<5;i++){method.visitInsn(org.objectweb.asm.Opcodes.DUP);method.visitInsn(org.objectweb.asm.Opcodes.ICONST_0+i);if(i==0)method.visitVarInsn(org.objectweb.asm.Opcodes.ALOAD,0);else method.visitLdcInsn(new String[]{"","/d","/c","exit","0"}[i]);method.visitInsn(org.objectweb.asm.Opcodes.AASTORE);}
+        method.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESPECIAL,"java/lang/ProcessBuilder","<init>","([Ljava/lang/String;)V",false);
+        method.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL,"java/lang/ProcessBuilder","start","()Ljava/lang/Process;",false);method.visitInsn(org.objectweb.asm.Opcodes.ARETURN);method.visitMaxs(0,0);method.visitEnd();writer.visitEnd();
+        var forged=new java.security.SecureClassLoader(NativeStartupCheck.class.getClassLoader()) {
+            Class<?> define(byte[] bytes){return defineClass("r24.check.ForgedOrigin",bytes,0,bytes.length,NativeStartupCheck.class.getProtectionDomain().getCodeSource());}
+        }.define(writer.toByteArray());
+        try {var launched=(Process)forged.getMethod("start",String.class).invoke(null,executable);launched.waitFor();throw new AssertionError("Forged CodeSource loader acquired process permission");}
+        catch(java.lang.reflect.InvocationTargetException refused){check(rootCause(refused) instanceof java.io.IOException,"Wrong forged-source refusal");}
+        check(shellCreate(executable,"/d /c exit 0")==1,"Exact Shell grant failed");
+        check(shellCreate(executable,"/d /c exit 1")==-5,"Shell argument mismatch was not denied");
+        System.out.println("HOST_POLICY_PASS before_shutdown_hooks exit_halt_self_terminate_refused exact_java_native_shell_grants forged_loader_refused attach_disabled");
+    }
     private static volatile byte[] nestedDump;
     private static volatile int heartbeatCallbacks;
     private static void check(boolean condition,String message) {
@@ -266,6 +339,7 @@ public final class NativeStartupCheck {
                 denied(suspendHandle(lowSuspend,base),0xffffffffL,"Protected Win32 suspend succeeded");
                 denied(terminateHandle(lowTerminate,base),0,"Protected Win32 terminate succeeded");
             }
+            check(ntThread(lowSuspend,false)==0xC0000022 && ntThread(lowTerminate,true)==0xC0000022,"Protected NT thread operation succeeded");
             System.out.println("THREAD_GUARD_STAGE java_suspend");
             long before=ticks.get();worker.suspend();
             try {for(int n=0;n<100&&ticks.get()<=before;n++)Thread.sleep(10);check(ticks.get()>before,"Protected Java suspend succeeded");}
@@ -273,6 +347,7 @@ public final class NativeStartupCheck {
             worker.stop();Thread.sleep(30);check(worker.isAlive(),"Protected Java stop succeeded");
             System.out.println("THREAD_GUARD_STAGE ordinary_os");
             ordinary=ordinaryHandle();check(ordinary!=0,"Ordinary worker fixture missing");
+            check(ntThread(ordinary,false)==0,"Ordinary NT suspend blocked");check(resumeHandle(ordinary)==1,"NT suspend count changed");
             check((suspendHandle(ordinary,false)&0xffffffffL)==0,"Ordinary Win32 suspend blocked");
             check(resumeHandle(ordinary)==1,"Ordinary suspend count changed");
             check((terminateHandle(ordinary,true)&0xffffffffL)!=0 && finishedHandle(ordinary),"Ordinary Win32 terminate blocked");
@@ -310,24 +385,24 @@ public final class NativeStartupCheck {
         System.out.println("CALLBACK_PUBLICATION_PASS concurrent_replace_capture JNI_OUTSIDE_NATIVE_LOCK");
     }
     private static void shutdownWhileEnumerating() throws Exception {
-        var running=new java.util.concurrent.atomic.AtomicBoolean(true);
-        var failure=new java.util.concurrent.atomic.AtomicReference<Throwable>();
-        var started=new java.util.concurrent.CountDownLatch(1);
-        Thread reader=new Thread(() -> {
-            started.countDown();
-            try { while(running.get()) { Thread.getAllStackTraces(); Thread.yield(); } }
-            catch(Throwable error) { failure.set(error); }
+        exitReaderRun=true;
+        exitReader=new Thread(() -> {
+            try {while(exitReaderRun){Thread.getAllStackTraces();Thread.yield();}}
+            catch(Throwable error){exitReaderFailure=error;}
         },"Secret-check-exit-enumerator");
-        reader.setDaemon(true);reader.start();started.await();
-        try { SecretNative.shutdown(); }
-        finally { running.set(false);reader.join(3000); }
-        check(!reader.isAlive()&&failure.get()==null,"Concurrent shutdown/enumeration failed: "+failure.get());
-        check(Thread.getAllStackTraces().containsKey(Thread.currentThread()),"Enumeration failed after shutdown");
-        System.out.println("THREAD_GUARD_EXIT_PASS concurrent_enumeration late_calls_safe");
+        exitReader.setDaemon(true);exitReader.start();
+        try {SecretNative.shutdown();throw new AssertionError("Unauthorized shutdown accepted");}
+        catch(IllegalStateException expected){check(rootCause(expected) instanceof SecurityException,"Wrong shutdown admission refusal");}
+        check(SecretNative.isLoaded(),"Unauthorized shutdown disarmed runtime");
+        System.out.println("HOST_SHUTDOWN_REFUSAL_PASS concurrent_enumeration_runtime_retained");
     }
     public static void main(String[] args) throws Exception {
+        if(args.length>0&&args[0].equals("--attach-helper")){attachHelper(args);return;}
         Path archive=Path.of(args[0]).toAbsolutePath(),directory=Path.of(args[1]).toAbsolutePath();
-        System.load(Path.of(args[2]).toAbsolutePath().toString());
+        Path probeDll=Path.of(args[2]).toAbsolutePath();prepareHostPolicy(directory,probeDll);
+        Path ready=directory.resolve("attach.ready"),done=directory.resolve("attach.done");java.nio.file.Files.deleteIfExists(ready);java.nio.file.Files.deleteIfExists(done);
+        Process attach=new ProcessBuilder(Path.of(System.getProperty("java.home"),"bin/java.exe").toString(),"--add-modules=jdk.attach","-cp",System.getProperty("java.class.path"),NativeStartupCheck.class.getName(),"--attach-helper",Long.toString(ProcessHandle.current().pid()),ready.toString(),done.toString()).inheritIO().start();
+        System.load(probeDll.toString());installFailureProbe();
         try(URLClassLoader service=new URLClassLoader(new java.net.URL[]{archive.toUri().toURL()},NativeStartupCheck.class.getClassLoader()) {
             @Override protected Class<?> loadClass(String name,boolean resolve) throws ClassNotFoundException {
                 if(!name.equals("com.himitsu.secret.bridge.SecretNative"))return super.loadClass(name,resolve);
@@ -345,6 +420,18 @@ public final class NativeStartupCheck {
             try {
                 SecretNative.load(directory,Duration.ofSeconds(10));
                 check(SecretNative.isLoaded(),"Production native runtime not ready");
+                Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                    try {
+                        long limit=System.nanoTime()+8_000_000_000L;
+                        while(SecretNative.isLoaded()&&System.nanoTime()<limit)Thread.sleep(10);
+                        exitReaderRun=false;if(exitReader!=null)exitReader.join(3000);
+                        boolean ok=allChecksPassed&&!SecretNative.isLoaded()&&exitReaderFailure==null&&(exitReader==null||!exitReader.isAlive());java.nio.file.Files.writeString(directory.resolve("exit.ok"),ok?"PASS":"FAIL");
+                        if(ok)System.out.println("NATIVE_STARTUP_EXIT_PASS actual_JVM_shutdown_hook NO_GAME");
+                    } catch(Throwable error){error.printStackTrace();}
+                },"Secret-check-natural-exit"));
+                java.nio.file.Files.writeString(ready,"ready");
+                check(attach.waitFor(6,java.util.concurrent.TimeUnit.SECONDS)&&attach.exitValue()==0&&java.nio.file.Files.readString(done).equals("PASS"),"External Attach did not fail promptly");
+                verifyHostPolicy();
                 var field=SecretNative.class.getDeclaredField("registeredBridge");field.setAccessible(true);
                 Class<?> bridge=(Class<?>)field.get(null);
                 check(bridge!=null&&bridge!=Object.class,"Invalid bridge identity");
@@ -360,9 +447,13 @@ public final class NativeStartupCheck {
                 verifyThreadGuards();
                 verifyEnvironmentChain(directory);
                 System.out.println("NATIVE_STARTUP_PASS two_loaders source_shield external_agent_isolated bridge="+bridge.getName());
-            } finally { shutdownWhileEnumerating(); }
+            } finally {
+                if(attach.isAlive()&&!java.nio.file.Files.exists(ready)){attach.destroy();attach.waitFor(3,java.util.concurrent.TimeUnit.SECONDS);}
+                shutdownWhileEnumerating();
+            }
         }
-        check(!SecretNative.isLoaded(),"Production native shutdown incomplete");
-        System.out.println("NATIVE_STARTUP_EXIT_PASS NO_GAME");
+        check(SecretNative.isLoaded(),"Production runtime stopped before actual JVM shutdown");
+        allChecksPassed=true;
+        System.out.println("NATIVE_STARTUP_AWAIT_NATURAL_EXIT NO_GAME");
     }
 }

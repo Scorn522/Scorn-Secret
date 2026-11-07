@@ -12,6 +12,7 @@ jobject define_event_bridge(JNIEnv* env,jbyteArray bytes,jclass bus,jobjectArray
 jobject verify_event_bridge(JNIEnv* env);
 jobject read_cleanup_task(JNIEnv* env,jobject task);
 bool maintain_event_bridge(JNIEnv* env);
+bool authenticated_host_call(JNIEnv* env,int owner,const char* method,const char* descriptor);
 bool apply_source_image(JNIEnv* env,jvmtiEnv* jvmti,jobject loader,jclass redefining,const char* name,jint length,
     const unsigned char* input, jint* output_length, unsigned char** output);
 }

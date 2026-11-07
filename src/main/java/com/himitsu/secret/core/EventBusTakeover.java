@@ -45,12 +45,13 @@ public final class EventBusTakeover {
         register(PlayerEvent.Clone.class, NetworkLifecycle.PlayerSync::playerClone);
         register(PlayerEvent.PlayerRespawnEvent.class, NetworkLifecycle.PlayerSync::playerRespawn);
         register(ItemTossEvent.class, CivilizationSurvival::itemToss);
+        register(net.minecraftforge.event.server.ServerStartingEvent.class,SecretEntityHooks::serverStarting);
         register(LevelEvent.Unload.class, SecretEntityLifecycle::levelUnload);
         register(net.minecraftforge.event.entity.EntityLeaveLevelEvent.class, SecretEntityLifecycle::entityLeft);
         register(TickEvent.LevelTickEvent.class, CivilizationSurvival::levelTick);
         if (FMLEnvironment.dist == Dist.CLIENT) {
             register(TickEvent.ClientTickEvent.class, event -> {
-                if (event.phase == TickEvent.Phase.END) CivilizationSurvival.clientTick();
+                if (event.phase == TickEvent.Phase.END) {RuntimeCompatibilityHooks.clientCore();CivilizationSurvival.clientTick();}
             });
             register(net.minecraftforge.client.event.RenderLevelStageEvent.class, ForgeRenderBridge::renderLevel);
             register(net.minecraftforge.client.event.RenderGuiOverlayEvent.Post.class, ForgeRenderBridge::renderGui);
@@ -97,7 +98,11 @@ public final class EventBusTakeover {
         try {
             for (; index < listeners.length; index++) {
                 if (getBoolean(TRACK_PHASES, bus) || listeners[index].getClass() != EventPriority.class) {
-                    dispatcher.invoke(listeners[index], event);
+                    try { dispatcher.invoke(listeners[index], event); }
+                    catch(SecurityException denied) {
+                        if(!com.himitsu.secret.bridge.SecretNative.isLoaded()
+                            || !Boolean.TRUE.equals(com.himitsu.secret.bridge.SecretNative.invokeChecked("HostDenied",denied))) throw denied;
+                    }
                 }
             }
         } catch (Throwable throwable) {

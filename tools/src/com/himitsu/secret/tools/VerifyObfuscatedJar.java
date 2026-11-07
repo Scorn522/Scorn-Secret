@@ -17,6 +17,13 @@ public final class VerifyObfuscatedJar {
         int verified = 0;
         try (JarFile jar = new JarFile(input.toFile())) {
             for (var entry : Collections.list(jar.entries())) {
+                if (entry.getName().equals("module-info.class")) {
+                    try(var stream=jar.getInputStream(entry)) {
+                        var module=java.lang.module.ModuleDescriptor.read(stream);
+                        if(!module.name().equals("secret.bootstrap")) throw new IllegalStateException("Unexpected service module: "+module.name());
+                    }
+                    continue;
+                }
                 if (!entry.getName().endsWith(".class")) {
                     continue;
                 }
@@ -39,12 +46,13 @@ public final class VerifyObfuscatedJar {
 
     private static void verifyDynamicHookNames(Path mapping) throws Exception {
         String transformer = null;
-        Set<String> expectedNames = new HashSet<>();
+        Set<String> expectedNames = new HashSet<>(Set.of("isCancelled","value"));
         for (String line : Files.readAllLines(mapping)) {
             if (line.startsWith("CLASS com/himitsu/secret/hook/HookTransformer -> ")) {
                 transformer = line.substring(line.indexOf(" -> ") + 4).replace('/', '.');
             } else if (line.startsWith("METHOD com/himitsu/secret/hook/HookResult.isCancelled()Z -> ")
                 || line.startsWith("METHOD com/himitsu/secret/hook/HookResult.value()Ljava/lang/Object; -> ")) {
+                expectedNames.remove(line.contains(".isCancelled(") ? "isCancelled" : "value");
                 expectedNames.add(line.substring(line.indexOf(" -> ") + 4));
             }
         }
@@ -77,7 +85,7 @@ public final class VerifyObfuscatedJar {
                 jar.getJarEntry("com/himitsu/secret/code/BootstrapPayload.class")
             ).readAllBytes();
             if (!contains(bootstrap, runtimeClass)
-                || contains(bootstrap, "com/himitsu/secret/util/SecretRuntime")) {
+                || !runtimeClass.equals("com/himitsu/secret/util/SecretRuntime") && contains(bootstrap, "com/himitsu/secret/util/SecretRuntime")) {
                 throw new IllegalStateException("Bootstrap runtime lookup was not remapped");
             }
         }

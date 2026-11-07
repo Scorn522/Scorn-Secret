@@ -1,4 +1,5 @@
 #include "himitsu/validation/validation_gate.hpp"
+#include "himitsu/platform/windows/thread_guard.hpp"
 
 #include "himitsu/core/native_log.hpp"
 #include "himitsu/platform/windows/module_conceal.hpp"
@@ -288,6 +289,7 @@ GateState state() {
             GetProcAddress(kernel32, "ExitProcess")
         );
 
+    himitsu::platform::windows::authorize_fatal_exit();
     latch_rejection();
     freeze_other_threads();
     if (gate_complete != nullptr) {

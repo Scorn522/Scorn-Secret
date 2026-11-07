@@ -2,6 +2,10 @@
 #include <jvmti.h>
 #include <windows.h>
 #include <cstdint>
+#include <string>
+#include <cstdio>
+#include <atomic>
+#include <shellapi.h>
 
 namespace {
 jobject JNICALL echo(JNIEnv*, jclass, jstring command, jobjectArray) { return command; }
@@ -87,4 +91,53 @@ extern "C" JNIEXPORT jint JNICALL Java_com_himitsu_secret_bridge_NativeStartupCh
     }
     // The disposable process owns these inert environments; no callbacks are installed.
     return count;
+}
+
+extern "C" JNIEXPORT jint JNICALL Java_com_himitsu_secret_bridge_NativeStartupCheck_ntThread(JNIEnv*,jclass,jlong value,jboolean terminate) {
+    auto module=GetModuleHandleW(L"ntdll.dll");HANDLE target=reinterpret_cast<HANDLE>(value);
+    if(terminate)return reinterpret_cast<LONG(NTAPI*)(HANDLE,LONG)>(GetProcAddress(module,"NtTerminateThread"))(target,0);
+    ULONG previous=0;return reinterpret_cast<LONG(NTAPI*)(HANDLE,PULONG)>(GetProcAddress(module,"NtSuspendThread"))(target,&previous);
+}
+extern "C" JNIEXPORT jboolean JNICALL Java_com_himitsu_secret_bridge_NativeStartupCheck_selfEndDenied(JNIEnv*,jclass,jboolean nt) {
+    if(nt)return reinterpret_cast<LONG(NTAPI*)(HANDLE,LONG)>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtTerminateProcess"))(GetCurrentProcess(),91)==static_cast<LONG>(0xC0000022L);
+    SetLastError(0);return !TerminateProcess(GetCurrentProcess(),92)&&GetLastError()==ERROR_ACCESS_DENIED;
+}
+extern "C" JNIEXPORT jint JNICALL Java_com_himitsu_secret_bridge_NativeStartupCheck_directAttach(JNIEnv*,jclass) {
+    auto function=reinterpret_cast<jint(JNICALL*)(char*,char*,char*,char*,char*)>(GetProcAddress(GetModuleHandleW(L"jvm.dll"),"JVM_EnqueueOperation"));
+    return function?function(nullptr,nullptr,nullptr,nullptr,nullptr):-1;
+}
+extern "C" JNIEXPORT jlong JNICALL Java_com_himitsu_secret_bridge_NativeStartupCheck_nativeCreate(JNIEnv* env,jclass,jstring program,jstring arguments,jboolean ansi) {
+    auto p=env->GetStringChars(program,nullptr),a=env->GetStringChars(arguments,nullptr);
+    std::wstring app(reinterpret_cast<const wchar_t*>(p),env->GetStringLength(program)),args(reinterpret_cast<const wchar_t*>(a),env->GetStringLength(arguments));
+    env->ReleaseStringChars(program,p);env->ReleaseStringChars(arguments,a);std::wstring line=L"\""+app+L"\" "+args;PROCESS_INFORMATION process{};BOOL created;
+    if(ansi) {std::string name(app.begin(),app.end()),command(line.begin(),line.end());STARTUPINFOA startup{};startup.cb=sizeof(startup);created=CreateProcessA(name.c_str(),command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,nullptr,&startup,&process);}
+    else {STARTUPINFOW startup{};startup.cb=sizeof(startup);created=CreateProcessW(app.c_str(),line.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,nullptr,&startup,&process);}
+    if(!created)return -static_cast<jlong>(GetLastError());WaitForSingleObject(process.hProcess,3000);DWORD result=1;GetExitCodeProcess(process.hProcess,&result);CloseHandle(process.hThread);CloseHandle(process.hProcess);return 1+static_cast<jlong>(result);
+}
+
+namespace {
+LONG CALLBACK startup_failure(EXCEPTION_POINTERS* error) {
+    if(error->ExceptionRecord->ExceptionCode!=EXCEPTION_ACCESS_VIOLATION)return EXCEPTION_CONTINUE_SEARCH;
+    HMODULE module=nullptr;auto address=error->ExceptionRecord->ExceptionAddress;
+    if(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,static_cast<LPCWSTR>(address),&module)) {
+        wchar_t path[MAX_PATH]{};GetModuleFileNameW(module,path,MAX_PATH);
+        if(wcsstr(path,L"himitsu.dll")) {
+            static std::atomic<int> count{0};if(count.fetch_add(1)<4)std::fprintf(stderr,"NATIVE_CHECK_FAULT code=%lx module=himitsu offset=%llx address=%llx\n",error->ExceptionRecord->ExceptionCode,
+                static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(address)-reinterpret_cast<std::uintptr_t>(module)),
+                static_cast<unsigned long long>(error->ExceptionRecord->ExceptionInformation[1]));
+        }
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+}
+extern "C" JNIEXPORT void JNICALL Java_com_himitsu_secret_bridge_NativeStartupCheck_installFailureProbe(JNIEnv*,jclass){AddVectoredExceptionHandler(0,startup_failure);}
+
+extern "C" JNIEXPORT jlong JNICALL Java_com_himitsu_secret_bridge_NativeStartupCheck_shellCreate(JNIEnv* env,jclass,jstring program,jstring arguments) {
+    auto p=env->GetStringChars(program,nullptr),a=env->GetStringChars(arguments,nullptr);
+    std::wstring app(reinterpret_cast<const wchar_t*>(p),env->GetStringLength(program)),args(reinterpret_cast<const wchar_t*>(a),env->GetStringLength(arguments));
+    env->ReleaseStringChars(program,p);env->ReleaseStringChars(arguments,a);
+    SHELLEXECUTEINFOW info{};info.cbSize=sizeof(info);info.fMask=SEE_MASK_NOCLOSEPROCESS|SEE_MASK_NOASYNC|SEE_MASK_FLAG_NO_UI;info.lpVerb=L"open";info.lpFile=app.c_str();info.lpParameters=args.c_str();info.nShow=SW_HIDE;
+    auto call=reinterpret_cast<decltype(&ShellExecuteExW)>(GetProcAddress(GetModuleHandleW(L"shell32.dll"),"ShellExecuteExW"));
+    if(!call || !call(&info))return -static_cast<jlong>(GetLastError());
+    if(!info.hProcess)return 0;WaitForSingleObject(info.hProcess,3000);DWORD result=1;GetExitCodeProcess(info.hProcess,&result);CloseHandle(info.hProcess);return 1+static_cast<jlong>(result);
 }

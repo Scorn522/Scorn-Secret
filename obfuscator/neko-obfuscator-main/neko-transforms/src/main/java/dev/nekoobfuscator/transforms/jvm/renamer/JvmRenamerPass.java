@@ -461,6 +461,7 @@ public final class JvmRenamerPass implements TransformPass {
     }
 
     private boolean canRenameMethod(PipelineContext pctx, L1Class clazz, MethodNode method) {
+        if (booleanOption(pctx, "privateMembersOnly", false) && (method.access & Opcodes.ACC_PRIVATE) == 0) return false;
         if ("<init>".equals(method.name) || "<clinit>".equals(method.name)) return false;
         if (matchesAnyClassPattern(stringListOption(pctx, "keepMemberNamesInClasses"), clazz.name())) return false;
         if (matchesAnyMemberPattern(stringListOption(pctx, "keepMethodNames"), clazz.name(), method.name, method.desc)) return false;
@@ -479,6 +480,7 @@ public final class JvmRenamerPass implements TransformPass {
     }
 
     private boolean canRenameField(PipelineContext pctx, L1Class clazz, FieldNode field) {
+        if (booleanOption(pctx, "privateMembersOnly", false) && (field.access & Opcodes.ACC_PRIVATE) == 0) return false;
         if (matchesAnyClassPattern(stringListOption(pctx, "keepMemberNamesInClasses"), clazz.name())) return false;
         if (JvmEnumAbi.isEnumConstantField(clazz, field)) return false;
         if (JvmRecordAbi.isRecordComponentField(clazz, field)) return false;

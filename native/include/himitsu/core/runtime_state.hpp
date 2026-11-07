@@ -36,6 +36,11 @@ public:
         jclass transformer=nullptr, render=nullptr;
         jclass bootstrap=nullptr, cleanup_reader=nullptr, event_installer=nullptr, event_bridge=nullptr, event_bus=nullptr, event_array_type=nullptr;
         jobject game_loader=nullptr, event_loader=nullptr, event_handles[2]{};
+        jclass host_hooks[3]{};
+        jobject shutdown_hook=nullptr, host_objects[2]{}, host_threads[2]{};
+        std::uint64_t host_generation[2]{};
+        unsigned host_phase[2]{};
+        std::vector<jobject> exit_denials;
         jfieldID event_field=nullptr;
         std::shared_ptr<const std::vector<unsigned char>> event_image;
         std::uint64_t event_generation=0;

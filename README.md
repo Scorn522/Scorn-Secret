@@ -2,10 +2,50 @@
 
 公开开发仓库：[Scorn522/Scorn-Secret](https://github.com/Scorn522/Scorn-Secret)。本地维护者 Scorn；上游作者署名及各组件许可证保留。
 
-当前源码版本：`4.3-local-test-r23-fix1`。本次同步 r22、r23 与 r23-fix1 源码（含 r22 必需的 r21 基础）；Java/Native 构建、退出模型和两套 Java 独立启动已通过，尚未实机验收。修订包本地路径为 `build/libs/Secret-4.3-local-test-r23-fix1.jar`（1,591,212 字节，89 个业务类），原 r23 包保留。本次仅同步源码、构建配置、检查代码与交付记录，不上传新的 JAR、日志、转储或本机配置；最近已同步成品仍为 [r20](releases/Secret-4.3-local-test-r20.jar)。
+当前源码版本：`4.3-local-test-r24`，基线 `r23-fix1 / 9d8ba59`。本次按用户要求同步 r24 源码、构建配置、检查代码与交付记录；候选 JAR、原始日志及本机配置保留在本地。Java/Native 构建和两种包在两套 Java 下的独立检查已通过，尚未部署或实机验收。开发包为 `build/libs/Secret-4.3-local-test-r24.jar`，独立轻量混淆包为 `build/libs/Secret-4.3-local-test-r24-release.jar`。保留旧版成品。
 
 
-基于 `Secret-4.3-local-test-r2`，固定开发目录为 `D:\桌面\Secret-4.3-dev`。版本 `4.3-local-test-r23-fix1`，保留原 Mod ID、Java/JNI 命名与资源。原始下载源码及独立 Scorn Secret 工程没有覆盖。
+基于 `Secret-4.3-local-test-r2`，固定开发目录为 `D:\桌面\Secret-4.3-dev`。版本 `4.3-local-test-r24`，保留原 Mod ID、Java/JNI 命名与资源。原始下载源码及独立 Scorn Secret 工程没有覆盖。
+
+
+## r24：进程内防护与独立发布
+
+- 退出授权绑定实际游戏对象、线程与关闭代次；退回标题的集成服退出不签发进程权限。`Shutdown.beforeHalt/halt0` 在关闭钩子前拒绝未授权退出，拒绝异常按对象身份识别。`SecretNative.shutdown` 和 Native `Shutdown` 只有真实 JVM 关闭阶段及已登记关闭线程可执行；配置失败前也先登记关闭协调器。
+- 客户端/服务端在真实入口登记核心线程；已进入主循环时通过原有生命周期事件补登记，正常客户端 Tick 只读一次已登记标志。ThreadEnd 与原 ClassFileLoadHook 合并发布，退休引用继续沿用读者计数和延迟回收。
+- 接入 `ProcessImpl.create`、`CreateProcessA/W`、`ShellExecuteA/W/ExA/ExW` 的精确授权。Java 来源限已知游戏或系统加载器，拒绝自建加载器伪造 CodeSource；来源与程序文件在核验及创建期间固定打开，核对路径、SHA-256、参数和工作目录；下层只传递同一次操作的许可。保存其他配置选项保留授权清单，规则只在启动时加载。
+- 拒绝本进程未授权 `TerminateProcess/NtTerminateProcess`，增加 `NtSuspendThread/NtTerminateThread` 的真实句柄身份核对。正常线程、JVM 必要挂起、MinHook 自身维护及正常线程结束保留；所有 Hook 使用原有 MinHook，退出只禁用并保留跳板。
+- 运行期 Attach 请求返回 OpenJDK 的禁用状态 `100`，不进入管道等待；外部 jcmd、线程转储和 JFR 控制随之不可用。Windows 客户端可能显示 `InternalError ... (100)`，这是 [OpenJDK Windows Attach 状态](https://github.com/openjdk/jdk17u/blob/master/src/hotspot/os/windows/attachListener_windows.cpp)；目标 JVM 继续运行。远程 Attach 线程没有 DLL 静态 TLS，新增 NT 入口使用 Windows TLS，并先放行无保护关系的线程，避免空 TLS 访问。
+- `EarlyBootstrapService.onLoad` 在明确 GAMEDIR 或唯一显式 `--gameDir` 时尝试提前引导；缺目录/依赖时保留 initialize 与 Mod 兜底。
+- `config/neko.yml` 是独立发布配置：保留全部类名/包名，只重命名可处理的私有成员，保留 JNI、ASM、反射、record、序列化与 Native 身份核对所需名称。原有 `validationSinkHardening` 保持启用（自动审批拒绝关闭该加固）。Native 去除调试信息与本机源码路径；保留三个引导导出、工具链异常展开 ABI、展开与重定位数据。映射只在 `build/neko/`。
+
+### 子进程清单
+
+位置为游戏目录 `config/secret.config`，默认没有允许规则。每项用唯一前缀 `process.allow.<名称>.`：
+
+| 字段 | 含义 |
+| --- | --- |
+| `kind` | `java`、`native` 或 `shell` |
+| `source` / `sourceSha256` | 实际来源 JAR/DLL 的绝对路径及 64 位小写 SHA-256；支持 Forge 的物理 union JAR 路径 |
+| `program` / `programSha256` | 实际执行程序的绝对路径及 SHA-256，不按模糊文件名放行 |
+| `arguments` | 精确参数字符串；空参数也须匹配 |
+| `directory` | 精确的绝对工作目录 |
+| `verb` / `target` | Shell 专用：精确动作及 URL/目录/文件目标 |
+| `childArguments` | Shell 专用：底层实际子进程的精确参数；Shell 授权不是任意子进程许可 |
+
+路径建议写成 `D:/...`；Properties 格式的反斜杠须转义。改动后重启才生效。Shell 的非字符串 PIDL/类键执行方式不在清单覆盖内，拒绝处理；不自动采用系统关联变化后的新程序。
+
+### 验收记录
+
+- `build checkNativeStartup secureJar` 已通过：`.work/r24-final-origin-build.log`。Java、Forge 登记、r16/r20 行为、r23 伴生任务取消、Native 退出/超时/引用模型均有本批执行证据。
+- 开发包的构建 JDK 与 PCL Java 独立启动已通过，均实际加载生产 DLL，并在并发枚举下通过真实 JVM 关闭钩子排空、退出码 0。PCL 记录：`.work/r24-final-pcl-dev.log`。
+- 独立混淆包也已分别通过构建 JDK 与 PCL Java 的生产 DLL 启动/真实关闭检查，退出码均为 0；记录为 `.work/r24-final-release-buildjdk.log` 和 `.work/r24-final-release-pcl.log`。两种包、两套 Java 均通过真实外部 Attach 拒绝、Java/Native/Shell 精确允许与参数拒绝、伪造加载器拒绝、NT 低权限线程句柄保护及 r22/r23 桥接与清理回归。
+- 开发包 1,547,763 字节；独立混淆包 1,434,753 字节；均为 89 个业务类，保留 `secret.bootstrap` 模块描述，无测试类、测试 DLL、脚本和日志。
+- 开发包 SHA-256：`82ca3c6caadd3d17c3c3dd1defda4874cc06fb7736029a8ea1a69e5132773713`。
+- 独立混淆包 SHA-256：`5a00a7f43151f9315684ca6711a8208bb47c4be9a4f06bcd658f696b06e34506`。
+- r13 `CivilizationSurvivalHooks.java` 摘要仍为 `05F0CA04266AA07F7B38487908EE880F057CDB586D40531BF9049D3DC843974F`。
+- 检查既有候选可使用 `checkNativeStartup -PsmokeJar=build/libs/<候选>.jar`，避免复验时重新封包；PCL 环境另传 `-PsmokeJava=<java.exe>`。
+
+边界：只保护当前进程中列出的入口；直接 ExitProcess、直接系统调用、外部进程强杀及任意内存改写不在完整覆盖内。不从已经进入的无返回退出流程中强行返回。真实菜单关闭、Alt+F4、专服停止、攻防、FPS 与保存退出**未执行**，不将离线通过等同于实机通过。
 
 ## 本批行为
 
@@ -22,7 +62,7 @@
 ## 构建
 
 设置 JDK17 的 `JAVA_HOME`，Python 和 Zig 0.13.0 可分别用 `HIMITSU_PYTHON`、`HIMITSU_ZIG` 指定，然后执行 `./gradlew.bat build --console=plain`。
-默认仅编译、离线检查和打包，不启动游戏、部署或上传。最终包为 `build/libs/Secret-4.3-local-test-r23-fix1.jar`，不要安装 intermediate JAR。原 r2 的本地开发配置和退出协调修复保留。
+默认仅编译、离线检查和打包，不启动游戏、部署或上传。开发包为 `build/libs/Secret-4.3-local-test-r24.jar`，不要安装 intermediate JAR。原 r2 的本地开发配置和退出协调修复保留。
 
 ## 证据与边界
 

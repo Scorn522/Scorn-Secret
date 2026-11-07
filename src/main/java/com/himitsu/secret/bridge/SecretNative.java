@@ -53,7 +53,7 @@ public final class SecretNative {
         bootstrap(gameDirectory);
         resolveBridge(readyTimeout);
         loaded = true;
-        registerShutdownHook();
+        registerShutdownHook(gameDirectory);
     }
 
     public static synchronized void loadEarly(Path gameDirectory) throws IOException {
@@ -160,11 +160,40 @@ public final class SecretNative {
         return bytes;
     }
 
-    private static void registerShutdownHook() {
-        Runtime.getRuntime().addShutdownHook(new Thread(
-            SecretNative::shutdown,
-            "Secret-Native-Shutdown"
-        ));
+    private static void registerShutdownHook(Path directory) throws IOException {
+        Thread hook=new Thread(SecretNative::shutdown,"Secret-Native-Shutdown");
+        invokeChecked("HostInstall",hook);
+        Runtime.getRuntime().addShutdownHook(hook);
+        java.util.Properties config=new java.util.Properties();
+        Path path=directory.resolve("config/secret.config");
+        if(Files.isRegularFile(path)) try(var reader=Files.newBufferedReader(path,StandardCharsets.UTF_8)) { config.load(reader); }
+        java.util.Set<String> names=new java.util.TreeSet<>();
+        for(String key:config.stringPropertyNames()) if(key.startsWith("process.allow.") && key.endsWith(".kind")) names.add(key.substring(0,key.length()-5));
+        java.util.List<String> rules=new java.util.ArrayList<>();
+        for(String name:names) for(String field:new String[]{"kind","source","sourceSha256","program","programSha256","arguments","directory","verb","target","childArguments"})
+            rules.add(config.getProperty(name+"."+field,""));
+        invokeChecked("HostPolicy",hook,rules.toArray(String[]::new));
+    }
+
+    // Cold JNI caller lookup, never used by rendering, ticks, or ordinary event dispatch.
+    private static String processSource() {
+        Class<?> caller=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).walk(frames -> frames
+            .map(StackWalker.StackFrame::getDeclaringClass)
+            .filter(type -> type!=SecretNative.class && type.getClassLoader()!=null).findFirst().orElse(null));
+        if(caller==null) return "";
+        ClassLoader loader=caller.getClassLoader();
+        if(loader!=SecretNative.class.getClassLoader() && loader!=ClassLoader.getSystemClassLoader())return "";
+        try {
+            var source=caller.getProtectionDomain().getCodeSource();if(source==null)return "";
+            var location=source.getLocation();
+            if(location.getProtocol().equals("file"))return Path.of(location.toURI()).toRealPath().toString();
+            if(!location.getProtocol().equals("union"))return "";
+            // SecureJarHandler's union location retains the physical archive path.
+            String archive=java.net.URLDecoder.decode(location.getPath(),StandardCharsets.UTF_8);
+            int end=archive.toLowerCase(java.util.Locale.ROOT).lastIndexOf(".jar");if(end<0)return "";
+            archive=archive.substring(0,end+4);if(archive.matches("^/[A-Za-z]:/.*"))archive=archive.substring(1);
+            return Path.of(archive).toRealPath().toString();
+        } catch(Exception failure) { return ""; }
     }
 
     public static void configure(Path gameDirectory, Path modPath) {
@@ -196,6 +225,8 @@ public final class SecretNative {
         return result;
     }
 
+    public static boolean runtimeActive() { return loaded && !shuttingDown; }
+
     public static boolean isLoaded() {
         return loaded;
     }
@@ -210,6 +241,8 @@ public final class SecretNative {
         Runnable cleanup;
         synchronized (SecretNative.class) {
             if (!loaded || shuttingDown) return;
+            // Authorization precedes Java cleanup and native guard teardown.
+            if(!Boolean.TRUE.equals(invokeChecked("HostShutdown"))) throw new SecurityException("No active JVM shutdown transaction");
             shutdownThread = Thread.currentThread();
             shuttingDown = true;
             cleanup = shutdownCleanup;
@@ -221,10 +254,10 @@ public final class SecretNative {
         } finally {
             try {
                 invokeChecked("Shutdown");
+                loaded = false;
             } catch (Throwable failure) {
                 System.err.println("[Secret/Shutdown] Native drain incomplete: "+failure);
             } finally {
-                loaded = false;
                 shutdownThread = null;
             }
         }

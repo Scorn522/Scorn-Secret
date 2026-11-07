@@ -198,7 +198,7 @@ jobject source_failure(JNIEnv* env,const char* message) {
     if(env->ExceptionCheck()){auto error=env->ExceptionOccurred();env->ExceptionClear();return error;}
     return new_exception(env,"java/lang/IllegalStateException",message);
 }
-bool registered_caller(JNIEnv* env,jclass expected,const char* method,const char* descriptor) {
+bool registered_caller(JNIEnv* env,jclass expected,const char* method,const char* descriptor,bool bootstrap_wrapper=false) {
     if(!expected)return false;
     auto* ti=State::instance().jvmti();jvmtiFrameInfo frames[32]{};jint count=0;
     if(!ti || ti->GetStackTrace(nullptr,0,32,frames,&count)!=JVMTI_ERROR_NONE)return false;
@@ -209,8 +209,9 @@ bool registered_caller(JNIEnv* env,jclass expected,const char* method,const char
             char* name=nullptr;char* signature=nullptr;
             auto error=ti->GetMethodName(frames[i].method,&name,&signature,nullptr);
             bool ok=error==JVMTI_ERROR_NONE && name && signature && !std::strcmp(name,method) && !std::strcmp(signature,descriptor);
+            bool wrapper=bootstrap_wrapper && error==JVMTI_ERROR_NONE && name && signature && !std::strcmp(name,"invokeChecked") && !std::strcmp(signature,"(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;");
             if(name)ti->Deallocate(reinterpret_cast<unsigned char*>(name));if(signature)ti->Deallocate(reinterpret_cast<unsigned char*>(signature));
-            return ok;
+            if(!wrapper)return ok;
         }
     }
     return false;
@@ -243,18 +244,23 @@ bool remember_game_bootstrap(JNIEnv* env,jclass bootstrap) {
 }
 bool remember_defined_installer(JNIEnv* env,jobject loader,jclass type,const unsigned char* data,std::size_t size) {
     auto name=class_name(data,size);bool cleanup=name==cleanup_name;
-    if(name!=installer_name && !cleanup)return true;
+    int host=name=="com/himitsu/secret/core/RuntimeCompatibilityHooks"?0:name=="com/himitsu/secret/core/SecretEntityHooks"?1:name=="com/himitsu/secret/core/EventBusTakeover"?2:-1;
+    if(name!=installer_name && !cleanup && host<0)return true;
     auto expected=lookup(name.c_str());
     if(!expected || expected->size()!=size || std::memcmp(expected->data(),data,size))return false;
     auto global=static_cast<jclass>(env->NewGlobalRef(type));if(!global)return false;
     bool reused=false;
     bool ok=change_sources(env,[&](const auto& before,auto& next){
         if(!before.bootstrap || !env->IsSameObject(loader,before.game_loader))return false;
-        auto previous=cleanup?before.cleanup_reader:before.event_installer;
+        auto previous=host>=0?before.host_hooks[host]:cleanup?before.cleanup_reader:before.event_installer;
         if(previous){reused=true;return env->IsSameObject(previous,type)==JNI_TRUE;}
-        if(cleanup)next.cleanup_reader=global;else next.event_installer=global;return true;
+        if(host>=0)next.host_hooks[host]=global;else if(cleanup)next.cleanup_reader=global;else next.event_installer=global;return true;
     });
     if(!ok || reused)env->DeleteGlobalRef(global);return ok;
+}
+bool authenticated_host_call(JNIEnv* env,int owner,const char* method,const char* descriptor) {
+    State::ReferenceRead read(State::instance(),env);
+    return registered_caller(env,owner<0?read->bootstrap:owner<3?read->host_hooks[owner]:nullptr,method,descriptor,owner<0);
 }
 // One explicit cleanup operation; no raw addresses, arbitrary field names or hot-path JNI.
 jobject read_cleanup_task(JNIEnv* env,jobject task) {

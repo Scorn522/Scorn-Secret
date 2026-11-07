@@ -11,20 +11,22 @@ transforms:
     packagePrefix: lIlIlI/
     renameRuntime: true
     renameMembers: true
+    privateMembersOnly: true
     classNameAlphabet: lI
     classNameLength: 24
     keepClassNames:
-      - com/himitsu/secret/SecretMod
-      - com/himitsu/secret/bridge/NativeBridge
-      - com/himitsu/secret/bridge/SecretNative
-      - com/himitsu/secret/bridge/EarlyBootstrapService
-      - com/himitsu/secret/code/BootstrapPayload
+      - '**'
     keepMemberNamesInClasses:
       - com/himitsu/secret/SecretMod
-      - com/himitsu/secret/bridge/NativeBridge
-      - com/himitsu/secret/bridge/SecretNative
-      - com/himitsu/secret/bridge/EarlyBootstrapService
-      - com/himitsu/secret/code/BootstrapPayload
+      - com/himitsu/secret/bridge/**
+      - com/himitsu/secret/code/**
+      - com/himitsu/secret/core/**
+      - com/himitsu/secret/hook/**
+      - com/himitsu/secret/transform/**
+      - com/himitsu/secret/client/render/**
+      - com/himitsu/secret/network/**
+      - com/himitsu/secret/config/**
+      - com/himitsu/secret/util/**
     keepMethodNames:
       - com/himitsu/secret/util/SecretRuntime.boot
 

@@ -10,6 +10,21 @@ import net.minecraft.client.gui.components.events.GuiEventListener;
 import net.minecraft.client.gui.screens.Screen;
 
 public final class RuntimeCompatibilityHooks {
+    private static boolean coreBound;
+    public static void clientCore() {
+        if(!coreBound && com.himitsu.secret.bridge.SecretNative.runtimeActive()) {
+            com.himitsu.secret.bridge.SecretNative.invokeChecked("HostLifecycle","client-register",Minecraft.getInstance());coreBound=true;
+        }
+    }
+    @AsmHook(targetClass="net/minecraft/client/Minecraft",targetMethod="run",targetAliases="m_91374_",targetDescriptor="()V",mode=HookMode.HEAD,includeThis=true)
+    public static void clientRun(Minecraft client) {
+        if(com.himitsu.secret.bridge.SecretNative.runtimeActive()) {com.himitsu.secret.bridge.SecretNative.invokeChecked("HostLifecycle","client-run",client);coreBound=true;}
+    }
+    @AsmHook(targetClass="net/minecraft/client/Minecraft",targetMethod="stop",targetAliases="m_91395_",targetDescriptor="()V",mode=HookMode.HEAD,includeThis=true)
+    public static void clientStop(Minecraft client) { if(com.himitsu.secret.bridge.SecretNative.runtimeActive()) com.himitsu.secret.bridge.SecretNative.invokeChecked("HostLifecycle","client-stop",client); }
+    @AsmHook(targetClass="net/minecraft/client/Minecraft",targetMethod="destroy",targetAliases="m_91393_",targetDescriptor="()V",mode=HookMode.HEAD,includeThis=true)
+    public static void clientClose(Minecraft client) { if(com.himitsu.secret.bridge.SecretNative.runtimeActive()) com.himitsu.secret.bridge.SecretNative.invokeChecked("HostLifecycle","client-close",client); }
+
     private RuntimeCompatibilityHooks() {
     }
 

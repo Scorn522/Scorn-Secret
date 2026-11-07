@@ -42,10 +42,21 @@ public final class SecretEntityHooks {
     private SecretEntityHooks() {
     }
 
+    @AsmHook(targetClass="net/minecraft/server/MinecraftServer",targetMethod="runServer",targetAliases="m_130011_",targetDescriptor="()V",mode=HookMode.HEAD,includeThis=true)
+    public static void serverRun(net.minecraft.server.MinecraftServer server) { if(com.himitsu.secret.bridge.SecretNative.runtimeActive()) com.himitsu.secret.bridge.SecretNative.invokeChecked("HostLifecycle","server-run",server); }
+    @AsmHook(targetClass="net/minecraft/server/MinecraftServer",targetMethod="halt",targetAliases="m_7570_",targetDescriptor="(Z)V",mode=HookMode.HEAD,includeThis=true)
+    public static void serverStop(net.minecraft.server.MinecraftServer server,boolean wait) { if(server.isDedicatedServer() && com.himitsu.secret.bridge.SecretNative.runtimeActive()) com.himitsu.secret.bridge.SecretNative.invokeChecked("HostLifecycle","server-stop",server); }
+    @AsmHook(targetClass="net/minecraft/server/dedicated/DedicatedServer",targetMethod="onServerExit",targetAliases="m_6988_",targetDescriptor="()V",mode=HookMode.HEAD,includeThis=true)
+    public static void serverExit(net.minecraft.server.dedicated.DedicatedServer server) { if(com.himitsu.secret.bridge.SecretNative.runtimeActive()) com.himitsu.secret.bridge.SecretNative.invokeChecked("HostLifecycle","server-exit",server); }
+
+    public static void serverStarting(net.minecraftforge.event.server.ServerStartingEvent event) {
+        if(com.himitsu.secret.bridge.SecretNative.runtimeActive()) com.himitsu.secret.bridge.SecretNative.invokeChecked("HostLifecycle","server-register",event.getServer());
+    }
+
     public static void installTargetGuards() {
         // Fixed lifecycle targets only; never enumerate or periodically retransform the JVM.
         Object result=com.himitsu.secret.bridge.SecretNative.invokeChecked("RetransformClass",(Object)new Class<?>[]{
-            net.minecraftforge.eventbus.EventBus.class, ServerLevel.class, PersistentEntitySectionManager.class,
+            net.minecraftforge.eventbus.EventBus.class, net.minecraft.server.MinecraftServer.class, net.minecraft.server.dedicated.DedicatedServer.class, ServerLevel.class, PersistentEntitySectionManager.class,
             net.minecraft.world.inventory.AbstractContainerMenu.class, net.minecraft.world.entity.player.Inventory.class,
             net.minecraft.server.network.ServerGamePacketListenerImpl.class, net.minecraft.server.players.PlayerList.class,
             net.minecraft.server.level.ServerPlayer.class, net.minecraft.network.Connection.class, EntityTickList.class, net.minecraft.world.level.entity.EntitySection.class,
@@ -55,6 +66,7 @@ public final class SecretEntityHooks {
         if(!Boolean.TRUE.equals(result)) throw new IllegalStateException("Target/Owner hook installation failed");
         for(String missing:com.himitsu.secret.hook.HookRegistry.audit().missingTargets()) {
             if(missing.startsWith("net/minecraftforge/eventbus/EventBus.post")
+                || missing.contains("SecretEntityHooks.server") || net.minecraftforge.fml.loading.FMLEnvironment.dist==net.minecraftforge.api.distmarker.Dist.CLIENT && missing.contains("RuntimeCompatibilityHooks.client")
                 || missing.contains("SecretEntityHooks.guardWorldEntry") || missing.contains("SecretEntityHooks.guardManagerEntry")
                 || missing.contains("SecretEntityHooks.guardSectionEntry") || net.minecraftforge.fml.loading.FMLEnvironment.dist==net.minecraftforge.api.distmarker.Dist.CLIENT && missing.contains("DeathExecutionHooks.ownerScreen")
                 || missing.contains("OwnerSafetyHooks.clicked") || missing.contains("OwnerSafetyHooks.pickup")
