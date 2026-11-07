@@ -3,6 +3,7 @@ package com.himitsu.secret.core;
 import java.lang.reflect.*;
 import java.util.*;
 import java.util.concurrent.*;
+import com.himitsu.secret.bridge.SecretNative;
 import com.himitsu.secret.network.*;
 import net.minecraft.client.Minecraft;
 import net.minecraft.nbt.*;
@@ -19,7 +20,7 @@ public final class TargetCleanup {
             List<Field> fields=new ArrayList<>();
             for(Class<?> c=type;c!=null && c!=Object.class && c!=Entity.class;c=c.getSuperclass()) {
                 if(c.getName().startsWith("java.") || c.getName().startsWith("net.minecraft.world.entity.LivingEntity")) break;
-                for(Field f:c.getDeclaredFields()) if(!f.getType().isPrimitive()) {
+                for(Field f:c.getDeclaredFields()) if(!f.getType().isPrimitive() || f.getType()==boolean.class) {
                     // An inaccessible field is unknown, not proof that no other owner exists.
                     try { f.trySetAccessible(); } catch(RuntimeException ignored) {}
                     fields.add(f);
@@ -36,6 +37,28 @@ public final class TargetCleanup {
     private static Field taskField(String type,String name) {
         try { return Class.forName(type,false,null).getDeclaredField(name); }
         catch(ReflectiveOperationException | RuntimeException unavailable) { return null; }
+    }
+    // Only explicit cleanup uses this bridge; no per-tick/per-frame Native reads.
+    private static Object[] readTask(Object task) {
+        if(SecretNative.isLoaded()) {
+            Object value=SecretNative.invokeChecked("ReadCleanupTask",task);
+            if(value instanceof Object[] snapshot && snapshot.length==4) return snapshot;
+            throw new IllegalStateException("Invalid cleanup task snapshot");
+        }
+        // The offline Java model has no DLL. Real runtime uses the authenticated JNI path above.
+        try {
+            if(CALLABLE==null || !CALLABLE.trySetAccessible()) throw new IllegalAccessException("Task metadata is inaccessible without Native");
+            Object callable=CALLABLE.get(task),body=callable,owner=null,outer=task;
+            if(RUNNABLE!=null && callable!=null && callable.getClass()==RUNNABLE.getDeclaringClass()) {
+                if(!RUNNABLE.trySetAccessible()) throw new IllegalAccessException("Runnable metadata unavailable");
+                body=RUNNABLE.get(callable);
+            }
+            if(SCHEDULED_OWNER!=null && task.getClass()==SCHEDULED_OWNER.getDeclaringClass()) {
+                if(!SCHEDULED_OWNER.trySetAccessible() || SCHEDULED_OUTER==null || !SCHEDULED_OUTER.trySetAccessible()) throw new IllegalAccessException("Scheduled metadata unavailable");
+                owner=SCHEDULED_OWNER.get(task);outer=SCHEDULED_OUTER.get(task);
+            }
+            return new Object[]{body,owner,outer,callable};
+        } catch(ReflectiveOperationException error) { throw new IllegalStateException("Cleanup task reader unavailable",error); }
     }
     private static Set<String> appliedBossBars=Set.of();
     private static final WeakTargetSet<Entity> INCOMPLETE=new WeakTargetSet<>(), QUEUED=new WeakTargetSet<>(), EXHAUSTED=new WeakTargetSet<>(), DISPATCHED=new WeakTargetSet<>();
@@ -135,9 +158,9 @@ public final class TargetCleanup {
         final Set<Object> seen=Collections.newSetFromMap(new IdentityHashMap<>()), knownSeen=Collections.newSetFromMap(new IdentityHashMap<>());
         final Set<String> bars=new LinkedHashSet<>();
         final Set<Object> changedContainers=Collections.newSetFromMap(new IdentityHashMap<>()), taskSeen=Collections.newSetFromMap(new IdentityHashMap<>()), ownedTasks=Collections.newSetFromMap(new IdentityHashMap<>());
-        final Map<Class<?>,Boolean> sources=new IdentityHashMap<>();
+        final Map<Class<?>,Boolean> sources=new IdentityHashMap<>(), origins=new IdentityHashMap<>();
         int failures,retained;
-        boolean knownNbtRecords;
+        boolean knownNbtRecords,savedRecords,activeRecords;
         Cleaner(Entity target) { this.target=target; uuid=target.uuid; }
         int result() { return (failures==0?0:RETRY)|(retained==0?0:RETAINED); }
         void state(int state) { if((state&RETRY)!=0) failures++; if((state&RETAINED)!=0) retained++; }
@@ -146,16 +169,31 @@ public final class TargetCleanup {
             else retained++;
         }
         boolean source(Class<?> type) {
-            Boolean known=sources.get(type); if(known!=null) return known;
+            Boolean known=sources.get(type);if(known!=null)return known;
+            boolean same=type.getClassLoader()==target.getClass().getClassLoader() && sameJar(type);
+            sources.put(type,same);return same;
+        }
+        boolean sameJar(Class<?> type) {
+            Boolean known=origins.get(type); if(known!=null) return known;
             boolean same=false;
             try {
-                var origin=target.getClass().getProtectionDomain().getCodeSource();
-                var candidate=type.getProtectionDomain().getCodeSource();
-                same=type.getClassLoader()==target.getClass().getClassLoader() && origin!=null && candidate!=null
-                    && origin.getLocation()!=null && candidate.getLocation()!=null
+                var origin=target.getClass().getProtectionDomain().getCodeSource();var candidate=type.getProtectionDomain().getCodeSource();
+                same=origin!=null && candidate!=null && origin.getLocation()!=null && candidate.getLocation()!=null
                     && origin.getLocation().toExternalForm().equals(candidate.getLocation().toExternalForm());
             } catch(RuntimeException denied) { retained++; }
-            sources.put(type,same); return same;
+            origins.put(type,same);return same;
+        }
+        boolean companion(Object value) {
+            if(value==null || value instanceof Entity || !sameJar(value.getClass()))return false;
+            Class<?> type=value.getClass();
+            if(!type.isSynthetic() && !type.isAnonymousClass() && !(type.isMemberClass() && !Modifier.isStatic(type.getModifiers())))return false;
+            boolean captured=false;int unreadable=retained;
+            for(Field f:FIELDS.get(type)) if(!Modifier.isStatic(f.getModifiers())) {
+                Object member=get(f,value);
+                if(member==target)captured=true;
+                else if(member instanceof Entity entity && !CivilizationSurvival.shouldDeath(entity))return false;
+            }
+            return captured && unreadable==retained;
         }
         Object get(Field f,Object owner) {
             if(f==null) { retained++; return null; }
@@ -177,9 +215,12 @@ public final class TargetCleanup {
         boolean record(Object value) {
             if(value==target) return true;
             if(value==null || value instanceof Entity) return false;
-            if(value instanceof CompoundTag tag) return knownNbtRecords && tag.hasUUID("UUID") && uuid.equals(tag.getUUID("UUID"));
+            if(value instanceof CompoundTag tag) return tag.hasUUID("UUID") && uuid.equals(tag.getUUID("UUID"))
+                && (knownNbtRecords || (savedRecords && !tag.getBoolean("Archived") && !tag.getBoolean("Cancelled")
+                    && (tag.getBoolean("PendingRespawn") || (activeRecords && tag.getBoolean("Active")))));
             // A reference alone does not authorize deleting a wrapper and its other duties.
-            if(!value.getClass().getName().equals("cn.blockforge.dyingsol.entity.BossIntegrityAgent$BossRecord") || !source(value.getClass())) return false;
+            if(!value.getClass().getName().equals("cn.blockforge.dyingsol.entity.BossIntegrityAgent$BossRecord")) return activeRecord(value);
+            if(!source(value.getClass())) return false;
             boolean matched=false; int unreadable=retained;
             for(Field f:FIELDS.get(value.getClass())) if(!Modifier.isStatic(f.getModifiers())) {
                 Object v=get(f,value);
@@ -188,27 +229,52 @@ public final class TargetCleanup {
             }
             return retained==unreadable && matched;
         }
-        boolean clear(Object owner,Field f) {
+        private boolean activeRecord(Object value) {
+            if(!savedRecords || value instanceof Map || value instanceof Collection || value.getClass().isArray() || !source(value.getClass()))return false;
+            int identifiers=0,unreadable=retained;boolean pending=false,active=false,snapshot=false;
+            for(Field f:FIELDS.get(value.getClass())) if(!Modifier.isStatic(f.getModifiers())) {
+                Object member=get(f,value);String name=f.getName().replace("_", "").toLowerCase(Locale.ROOT);
+                if(member instanceof UUID id) {if(!uuid.equals(id))return false;identifiers++;}
+                else if(member instanceof Entity entity && entity!=target && !CivilizationSurvival.shouldDeath(entity))return false;
+                else if(member instanceof CompoundTag tag && tag.hasUUID("UUID")) {if(!uuid.equals(tag.getUUID("UUID")))return false;snapshot=true;}
+                else if(member instanceof Boolean flag) {
+                    if((name.equals("archived") || name.equals("cancelled") || name.equals("canceled") || name.equals("completed")) && flag)return false;
+                    if(name.equals("active") || name.equals("enabled")) {if(!flag)return false;active=true;}
+                    if(name.equals("pendingrespawn") || name.equals("respawnpending") || name.equals("revivepending")
+                        || name.equals("pendingrevival") || name.equals("resurrecting") || name.equals("respawning"))pending|=flag;
+                }
+            }
+            return unreadable==retained && identifiers==1 && (pending || (active && activeRecords && snapshot));
+        }
+        boolean clear(Object owner,Field f) { return clear(owner,f,target); }
+        boolean clear(Object owner,Field f,Object expected) {
             if(Modifier.isFinal(f.getModifiers())) { retained++; return false; }
             try {
-                if(get(f,owner)!=target) { failures++; return false; }
+                if(get(f,owner)!=expected) { failures++; return false; }
                 f.set(owner,null); return true;
             } catch(ReflectiveOperationException | RuntimeException error) { retained++; return false; }
         }
         boolean field(Object owner,Field f,Object value) {
             if(value==null) return false;
-            return value==target?clear(owner,f):contents(value,0);
+            if(value==target)return clear(owner,f);
+            if(savedRecords && record(value))return clear(owner,f,value);
+            return contents(value,0);
         }
         boolean savedData(SavedData data) {
             if(data==null || !source(data.getClass())) return false;
-            boolean previous=knownNbtRecords,changed=false;
+            boolean previous=knownNbtRecords,previousSaved=savedRecords,previousActive=activeRecords,changed=false;
+            savedRecords=true;
             try {
                 for(Field f:FIELDS.get(data.getClass())) if(!Modifier.isStatic(f.getModifiers())) {
+                    String name=f.getName().replace("_", "").toLowerCase(Locale.ROOT);
+                    activeRecords=(name.contains("respawn") || name.contains("reviv") || name.contains("resurrect"))
+                        && (name.contains("active") || name.contains("pending") || name.contains("queue"))
+                        && !name.contains("history") && !name.contains("archive");
                     knownNbtRecords=f.getDeclaringClass()==data.getClass() && f.getName().equals("ssList") && f.getType()==ListTag.class
                         && data.getClass().getName().equals("plz.lizi.supersteve.level.SSSaveData");
                     changed|=field(data,f,get(f,data));
                 }
-            } finally { knownNbtRecords=previous; if(changed) data.setDirty(); }
+            } finally { knownNbtRecords=previous;savedRecords=previousSaved;activeRecords=previousActive;if(changed)data.setDirty(); }
             return changed;
         }
         @SuppressWarnings({"rawtypes","unchecked"})
@@ -224,6 +290,7 @@ public final class TargetCleanup {
                         if(key==target || record(old)) {
                             if(key==target && shared(old)) { retained++; continue; }
                             boolean ownRecord=record(old);
+                            if(key!=target && !ownRecord) { failures++;continue; }
                             if(remove(map,iterator,entry,key,old)) { changed=true; if(ownRecord) bossFields(old,0); }
                         } else { changed|=directReferences(old); if(depth==0) changed|=contents(old,1); }
                     }
@@ -332,14 +399,19 @@ public final class TargetCleanup {
                 while(iterator.hasNext()) { Object task=iterator.next();
                     if(task==target && pool.getClass()==ThreadPoolExecutor.class) { iterator.remove(); }
                     else if(task instanceof Future<?> future) cancel(future,pool);
+                    else if(companion(task) && (task.getClass().getMethod("equals",Object.class).getDeclaringClass()==Object.class)) iterator.remove();
                     else if(captured(task)) retained++;
                 }
-            } catch(RuntimeException error) { failed(error); }
+            } catch(ReflectiveOperationException | RuntimeException error) { failed(error); }
         }
         private boolean queue(Object queue) {
             Class<?> c=queue.getClass();
             return c==LinkedBlockingQueue.class || c==ArrayBlockingQueue.class
                 || (c.getClassLoader()==null && c.getName().equals("java.util.concurrent.ScheduledThreadPoolExecutor$DelayedWorkQueue"));
+        }
+        private Object[] taskSnapshot(Future<?> task) {
+            try { return readTask(task); }
+            catch(RuntimeException unavailable) { failed(unavailable);return null; }
         }
         private void cancel(Future<?> future,ThreadPoolExecutor pool) {
             if(!taskSeen.add(future)) { unlink(future,pool); return; }
@@ -347,16 +419,17 @@ public final class TargetCleanup {
             boolean scheduled=SCHEDULED_OWNER!=null && type==SCHEDULED_OWNER.getDeclaringClass();
             if(type!=FutureTask.class && !scheduled) { retained++; return; }
             if(future.isDone()) return;
+            Object[] snapshot=taskSnapshot(future);if(snapshot==null)return;Object body=snapshot[0];
             if(scheduled) {
-                Object owner=get(SCHEDULED_OWNER,future);
-                if(owner==null || owner.getClass()!=ScheduledThreadPoolExecutor.class || get(SCHEDULED_OUTER,future)!=future
-                    || (pool!=null && pool!=owner)) { retained++; return; }
+                Object owner=snapshot[1];
+                if(owner==null || owner.getClass()!=ScheduledThreadPoolExecutor.class || snapshot[2]!=future
+                    || (pool!=null && pool!=owner)) { retained++;return; }
                 pool=(ThreadPoolExecutor)owner;
             }
-            Object callable=get(CALLABLE,future),body=callable;
-            if(RUNNABLE!=null && callable!=null && callable.getClass()==RUNNABLE.getDeclaringClass()) body=get(RUNNABLE,callable);
-            if(body!=target) { if(captured(body)) retained++; return; }
-            if(get(CALLABLE,future)!=callable || (body!=callable && get(RUNNABLE,callable)!=target)) { failures++; return; }
+            if(body!=target && !companion(body)) { if(captured(body))retained++;return; }
+            Object[] current=taskSnapshot(future);if(current==null)return;
+            for(int i=0;i<4;i++)if(current[i]!=snapshot[i]) {failures++;return;}
+            if(body!=target && !companion(body)) {failures++;return;}
             ownedTasks.add(future);
             // This prevents future execution/rescheduling; it never interrupts an in-flight call.
             if(!future.cancel(false) && !future.isDone()) failures++;

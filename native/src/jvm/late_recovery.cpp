@@ -855,6 +855,8 @@ bool late_recover_jni_dispatch(JNIEnv* env) {
     const std::vector<std::size_t> verify{
         offsetof(JNINativeInterface_, CallStaticVoidMethodV)/sizeof(void*),
         offsetof(JNINativeInterface_, GetStaticObjectField)/sizeof(void*),
+        offsetof(JNINativeInterface_, GetFieldID)/sizeof(void*),
+        offsetof(JNINativeInterface_, GetObjectField)/sizeof(void*),
         offsetof(JNINativeInterface_, CallBooleanMethodV)/sizeof(void*),
         offsetof(JNINativeInterface_, CallIntMethodV)/sizeof(void*),
         offsetof(JNINativeInterface_, CallLongMethodV)/sizeof(void*),

@@ -253,6 +253,7 @@ jobject dispatch_command(JNIEnv* env, jstring command_value, jobjectArray argume
             argument(env, arguments, 1)
         );
     }
+    if(command=="ReadCleanupTask") return himitsu::jvm::read_cleanup_task(env,argument(env,arguments,0));
     if(command=="DefineEventBusBridge" || command=="VerifyEventBusBridge") {
         if(!himitsu::validation::capability::is_enabled(himitsu::validation::capability::Feature::def_class))
             return himitsu::jvm::new_exception(env,"java/lang/SecurityException","Feature not enabled");

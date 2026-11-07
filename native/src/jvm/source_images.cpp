@@ -182,6 +182,7 @@ namespace {
 using State=himitsu::core::RuntimeState;
 constexpr const char* event_name="net/minecraftforge/eventbus/SecretEventBusBridge";
 constexpr const char* installer_name="com/himitsu/secret/core/EventBusBridge";
+constexpr const char* cleanup_name="com/himitsu/secret/core/TargetCleanup";
 std::atomic<bool> event_installing{false};
 std::atomic<unsigned long long> next_binding_report{0};
 template<class Change> bool change_sources(JNIEnv* env,Change change) {
@@ -197,22 +198,25 @@ jobject source_failure(JNIEnv* env,const char* message) {
     if(env->ExceptionCheck()){auto error=env->ExceptionOccurred();env->ExceptionClear();return error;}
     return new_exception(env,"java/lang/IllegalStateException",message);
 }
-bool installer_caller(JNIEnv* env,const State::References& refs) {
-    if(!refs.event_installer)return false;
+bool registered_caller(JNIEnv* env,jclass expected,const char* method,const char* descriptor) {
+    if(!expected)return false;
     auto* ti=State::instance().jvmti();jvmtiFrameInfo frames[32]{};jint count=0;
     if(!ti || ti->GetStackTrace(nullptr,0,32,frames,&count)!=JVMTI_ERROR_NONE)return false;
     for(jint i=0;i<count;++i) {
         jclass type=nullptr;if(ti->GetMethodDeclaringClass(frames[i].method,&type)!=JVMTI_ERROR_NONE)return false;
-        bool owner=env->IsSameObject(type,refs.event_installer);env->DeleteLocalRef(type);
+        bool owner=env->IsSameObject(type,expected);env->DeleteLocalRef(type);
         if(owner) {
             char* name=nullptr;char* signature=nullptr;
             auto error=ti->GetMethodName(frames[i].method,&name,&signature,nullptr);
-            bool ok=error==JVMTI_ERROR_NONE && name && signature && !std::strcmp(name,"defineAndBind") && !std::strcmp(signature,"()Ljava/lang/Class;");
+            bool ok=error==JVMTI_ERROR_NONE && name && signature && !std::strcmp(name,method) && !std::strcmp(signature,descriptor);
             if(name)ti->Deallocate(reinterpret_cast<unsigned char*>(name));if(signature)ti->Deallocate(reinterpret_cast<unsigned char*>(signature));
             return ok;
         }
     }
     return false;
+}
+bool installer_caller(JNIEnv* env,const State::References& refs) {
+    return registered_caller(env,refs.event_installer,"defineAndBind","()Ljava/lang/Class;");
 }
 bool binding_matches(JNIEnv* env,const State::References& refs) {
     auto value=env->GetStaticObjectField(refs.event_bridge,refs.event_field);
@@ -238,17 +242,57 @@ bool remember_game_bootstrap(JNIEnv* env,jclass bootstrap) {
     if(!ok || reused){env->DeleteGlobalRef(owner);if(global)env->DeleteGlobalRef(global);}return ok;
 }
 bool remember_defined_installer(JNIEnv* env,jobject loader,jclass type,const unsigned char* data,std::size_t size) {
-    if(class_name(data,size)!=installer_name)return true;
-    auto expected=lookup(installer_name);
+    auto name=class_name(data,size);bool cleanup=name==cleanup_name;
+    if(name!=installer_name && !cleanup)return true;
+    auto expected=lookup(name.c_str());
     if(!expected || expected->size()!=size || std::memcmp(expected->data(),data,size))return false;
     auto global=static_cast<jclass>(env->NewGlobalRef(type));if(!global)return false;
     bool reused=false;
     bool ok=change_sources(env,[&](const auto& before,auto& next){
         if(!before.bootstrap || !env->IsSameObject(loader,before.game_loader))return false;
-        if(before.event_installer){reused=true;return env->IsSameObject(before.event_installer,type)==JNI_TRUE;}
-        next.event_installer=global;return true;
+        auto previous=cleanup?before.cleanup_reader:before.event_installer;
+        if(previous){reused=true;return env->IsSameObject(previous,type)==JNI_TRUE;}
+        if(cleanup)next.cleanup_reader=global;else next.event_installer=global;return true;
     });
     if(!ok || reused)env->DeleteGlobalRef(global);return ok;
+}
+// One explicit cleanup operation; no raw addresses, arbitrary field names or hot-path JNI.
+jobject read_cleanup_task(JNIEnv* env,jobject task) {
+    auto& state=State::instance();State::ReferenceRead read(state,env);
+    if(!registered_caller(env,read->cleanup_reader,"readTask","(Ljava/lang/Object;)[Ljava/lang/Object;"))
+        return new_exception(env,"java/lang/SecurityException","Authenticated cleanup reader required");
+    if(!task)return new_exception(env,"java/lang/IllegalArgumentException","Task required");
+    if(env->PushLocalFrame(16)!=JNI_OK)return take_exception(env);
+    auto finish=[&](jobject value){return env->PopLocalFrame(value);};
+    auto future=env->FindClass("java/util/concurrent/FutureTask");
+    auto scheduled=env->FindClass("java/util/concurrent/ScheduledThreadPoolExecutor$ScheduledFutureTask");
+    auto adapter=env->FindClass("java/util/concurrent/Executors$RunnableAdapter");
+    auto object=env->FindClass("java/lang/Object");auto actual=env->GetObjectClass(task);
+    if(env->ExceptionCheck() || !future || !scheduled || !adapter || !object || !actual)return finish(take_exception(env));
+    bool timed=env->IsSameObject(actual,scheduled)==JNI_TRUE;
+    if(!timed && !env->IsSameObject(actual,future))return finish(new_exception(env,"java/lang/IllegalArgumentException","Unsupported task wrapper"));
+    auto callable_field=env->GetFieldID(future,"callable","Ljava/util/concurrent/Callable;");
+    if(!callable_field || env->ExceptionCheck())return finish(take_exception(env));
+    auto callable=env->GetObjectField(task,callable_field);jobject body=callable,owner=nullptr,outer=task;
+    if(callable) {
+        auto type=env->GetObjectClass(callable);
+        if(env->IsSameObject(type,adapter)) {
+            auto field=env->GetFieldID(adapter,"task","Ljava/lang/Runnable;");
+            if(!field || env->ExceptionCheck())return finish(take_exception(env));
+            body=env->GetObjectField(callable,field);
+        }
+    }
+    if(timed) {
+        auto owner_field=env->GetFieldID(scheduled,"this$0","Ljava/util/concurrent/ScheduledThreadPoolExecutor;");
+        auto outer_field=env->GetFieldID(scheduled,"outerTask","Ljava/util/concurrent/RunnableScheduledFuture;");
+        if(!owner_field || !outer_field || env->ExceptionCheck())return finish(take_exception(env));
+        owner=env->GetObjectField(task,owner_field);outer=env->GetObjectField(task,outer_field);
+    }
+    if(env->ExceptionCheck())return finish(take_exception(env));
+    auto result=env->NewObjectArray(4,object,nullptr);
+    if(result) {env->SetObjectArrayElement(result,0,body);env->SetObjectArrayElement(result,1,owner);
+        env->SetObjectArrayElement(result,2,outer);env->SetObjectArrayElement(result,3,callable);}
+    return finish(env->ExceptionCheck()?take_exception(env):result);
 }
 bool maintain_event_bridge(JNIEnv* env) {
     auto& state=State::instance();if(state.shutting_down())return false;

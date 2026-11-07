@@ -73,7 +73,14 @@ public final class TargetGuardCheck {
     public static class CleanupData extends net.minecraft.world.level.saveddata.SavedData {
         public Map<Object,Object> rows=new LinkedHashMap<>();
         public List<UUID> history=new ArrayList<>();
+        public List<Object> activeRespawns=new ArrayList<>();
         public net.minecraft.nbt.CompoundTag save(net.minecraft.nbt.CompoundTag tag) {return tag;}
+    }
+    public static final class RespawnRecord {
+        public UUID uuid;
+        public boolean active=true,pendingRespawn,archived;
+        public net.minecraft.nbt.CompoundTag snapshot;
+        RespawnRecord(UUID uuid,boolean pending) {this.uuid=uuid;pendingRespawn=pending;snapshot=new net.minecraft.nbt.CompoundTag();snapshot.putUUID("UUID",uuid);}
     }
     public static final class RetryCollection extends ArrayList<Object> {
         int attempts;
@@ -586,7 +593,7 @@ public final class TargetGuardCheck {
         var capture=(java.util.function.Consumer<CancelEvent>)(e->target.calls++);
         bus.addListener(net.minecraftforge.eventbus.api.EventPriority.NORMAL,false,CancelEvent.class,capture);
         check(!EventBusTakeover.detachTarget(bus,target),"capturing listener falsely reported fully detached");
-        bus.post(new CancelEvent());check(target.calls==1,"capturing shared listener removed or invoked during inspection");
+        bus.post(new CancelEvent());check(target.calls==0,"eligible companion listener still dispatched");
         var cleanup=new TargetCleanup.Cleaner(target);int state=EventBusTakeover.detachTargetState(bus,cleanup);
         check((state&TargetCleanup.RETAINED)!=0&&(state&TargetCleanup.RETRY)==0,"stable listener index schedules retries");
         int[] raceCalls={0};net.minecraftforge.eventbus.api.IEventListener raced=e->raceCalls[0]++;
@@ -742,6 +749,17 @@ public final class TargetGuardCheck {
         var data=new CleanupData();data.rows.put("target",target);data.rows.put("neighbor",other);data.history.add(target.uuid);
         check(new TargetCleanup.Cleaner(target).savedData(data)&&data.isDirty()&&data.rows.get("neighbor")==other&&data.history.equals(List.of(target.uuid)),"SavedData exact removal damaged UUID history");
         data.setDirty(false);check(!new TargetCleanup.Cleaner(target).savedData(data)&&!data.isDirty(),"unchanged SavedData was dirtied");
+        var pending=new RespawnRecord(target.uuid,true);var historyRecord=new RespawnRecord(target.uuid,false);
+        var archived=new RespawnRecord(target.uuid,true);archived.archived=true;
+        var disabled=new RespawnRecord(target.uuid,true);disabled.active=false;
+        var unrelatedRecord=new RespawnRecord(other.uuid,true);
+        data.rows.put("pending",pending);data.rows.put("history",historyRecord);data.rows.put("archived",archived);
+        data.rows.put("disabled",disabled);data.rows.put("other",unrelatedRecord);data.rows.put(target.uuid,9L);
+        var active=new RespawnRecord(target.uuid,false);data.activeRespawns.add(active);
+        cleaner=new TargetCleanup.Cleaner(target);
+        check(cleaner.savedData(data)&&!data.rows.containsKey("pending")&&data.activeRespawns.isEmpty()&&data.isDirty(),"active resurrection records survived");
+        check(data.rows.get("history")==historyRecord&&data.rows.get("archived")==archived&&data.rows.get("disabled")==disabled
+            &&data.rows.get("other")==unrelatedRecord&&data.rows.get(target.uuid).equals(9L),"UUID history or counters were purged");
         // Inaccessible metadata remains visible to classification and fails closed.
         Field fields=TargetCleanup.class.getDeclaredField("FIELDS");fields.setAccessible(true);
         ((ClassValue<Field[]>)fields.get(null)).get(CleanupRecord.class)[0].setAccessible(false);
@@ -770,7 +788,7 @@ public final class TargetGuardCheck {
         var rows=new ArrayList<Object>(List.of(boss));check(new TargetCleanup.Cleaner(target).contents(rows,0)&&rows.isEmpty(),"known BossRecord regression");
         bossType.getField("entity").set(boss,other);rows.add(boss);check(!new TargetCleanup.Cleaner(target).contents(rows,0)&&rows.size()==1,"known record with another live entity removed");
         var dataType=loader.define(dataName.replace('/','.'),cleanupImage(dataName,org.objectweb.asm.Type.getInternalName(CleanupData.class),"ssList","Lnet/minecraft/nbt/ListTag;","metadata","Lnet/minecraft/nbt/ListTag;"),source);
-        var data=(CleanupData)unsafe().allocateInstance(dataType);data.rows=new LinkedHashMap<>();data.history=new ArrayList<>();
+        var data=(CleanupData)unsafe().allocateInstance(dataType);data.rows=new LinkedHashMap<>();data.history=new ArrayList<>();data.activeRespawns=new ArrayList<>();
         var own=new net.minecraft.nbt.CompoundTag();own.putUUID("UUID",target.uuid);var unrelated=new net.minecraft.nbt.CompoundTag();unrelated.putUUID("UUID",UUID.randomUUID());
         var list=new net.minecraft.nbt.ListTag();list.add(own);list.add(unrelated);var history=new net.minecraft.nbt.ListTag();history.add(own.copy());
         dataType.getField("ssList").set(data,list);dataType.getField("metadata").set(data,history);
@@ -778,7 +796,7 @@ public final class TargetGuardCheck {
         data.rows.put("target",original);data.setDirty(false);
         check(!new TargetCleanup.Cleaner(original).savedData(data)&&data.rows.get("target")==original&&!data.isDirty(),"different loader SavedData was modified");
         var foreign=loader.define("fixture.ForeignData",cleanupImage("fixture/ForeignData",org.objectweb.asm.Type.getInternalName(CleanupData.class)),new java.net.URL("file:/different-mod.jar"));
-        var wrong=(CleanupData)unsafe().allocateInstance(foreign);wrong.rows=new LinkedHashMap<>();wrong.rows.put("target",target);wrong.history=new ArrayList<>();
+        var wrong=(CleanupData)unsafe().allocateInstance(foreign);wrong.rows=new LinkedHashMap<>();wrong.rows.put("target",target);wrong.history=new ArrayList<>();wrong.activeRespawns=new ArrayList<>();
         check(!new TargetCleanup.Cleaner(target).savedData(wrong)&&wrong.rows.get("target")==target&&!wrong.isDirty(),"different source SavedData was modified");
     }
     private static void checkR23Tasks() throws Exception {
@@ -788,7 +806,10 @@ public final class TargetGuardCheck {
         if(!accessible) {check(cleaner.retained>0,"closed JDK wrapper missing retained outcome");future.run();check(target.calls==1,"unreadable task behavior changed");}
         else {future.run();check(target.calls==0,"cancelled target task ran");}
         var capturing=new java.util.concurrent.FutureTask<Void>(()->{target.calls++;},null);cleaner=new TargetCleanup.Cleaner(target);cleaner.tasks(capturing);
-        check(!capturing.isCancelled()&&cleaner.retained>0,"captured lambda treated as exclusive task");
+        check(capturing.isCancelled()==accessible,"eligible companion task was not cancelled");
+        var other=cleanupTarget();other.id=target.id+1;
+        var shared=new java.util.concurrent.FutureTask<Void>(()->{target.calls++;other.calls++;},null);
+        cleaner=new TargetCleanup.Cleaner(target);cleaner.tasks(shared);check(!shared.isCancelled(),"callback with another live entity was cancelled");
         var custom=new java.util.concurrent.FutureTask<Void>(target,null) {public boolean cancel(boolean interrupt){throw new AssertionError("custom cancel must not be invoked");}};
         cleaner=new TargetCleanup.Cleaner(target);cleaner.tasks(custom);check(cleaner.retained>0&&!custom.isCancelled(),"custom task was not retained");
         var pool=new java.util.concurrent.ThreadPoolExecutor(1,1,1,java.util.concurrent.TimeUnit.SECONDS,new java.util.concurrent.LinkedBlockingQueue<>());
@@ -818,7 +839,7 @@ public final class TargetGuardCheck {
                 } finally {target.release.countDown();worker.join(3000);check(!worker.isAlive(),"fixture did not exit");}
             } finally {timer.shutdownNow();check(timer.awaitTermination(3,java.util.concurrent.TimeUnit.SECONDS),"timer fixture did not exit");}
         }
-        System.out.println("PRECISE_TASKS_PASS wrapperAccess="+accessible+" exact_receiver_capture_retained_pool_alive_no_interrupt MODEL_NO_GAME");
+        System.out.println("PRECISE_TASKS_PASS companion_cancel wrapperAccess="+accessible+" exact_receiver_capture_retained_pool_alive_no_interrupt MODEL_NO_GAME");
     }
 
     public static void main(String[] args) throws Exception {

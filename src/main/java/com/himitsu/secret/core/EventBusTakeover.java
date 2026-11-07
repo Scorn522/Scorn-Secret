@@ -130,42 +130,50 @@ public final class EventBusTakeover {
         int result=0; Object target=cleanup.target;
         try {
             var index=(java.util.Map<?,?>)get(LISTENERS,bus);
-            // Captures are candidates only: a shared callback can have unrelated duties.
+            var owners=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Object,Boolean>());
+            owners.add(target);
             for(var entry:index.entrySet()) {
                 Object key=entry.getKey();
-                if(key!=target && !(key instanceof Class<?>) && cleanup.captured(key)) result|=TargetCleanup.RETAINED;
-            }
-            Object found=registration(index,target);
-            if(found==null) return result;
-            if(!(found instanceof List<?> registered)) return result|TargetCleanup.RETAINED;
-            Object[] snapshot;
-            synchronized(registered) { snapshot=registered.toArray(); }
-            for(Object value:snapshot) {
-                if(!(value instanceof IEventListener listener)
-                    || value.getClass().getMethod("equals",Object.class).getDeclaringClass()!=Object.class) {
-                    result|=TargetCleanup.RETAINED; continue;
+                if(key!=target && !(key instanceof Class<?>)) {
+                    if(cleanup.companion(key))owners.add(key);
+                    else if(cleanup.captured(key))result|=TargetCleanup.RETAINED;
                 }
-                boolean shared=false;
-                for(var entry:index.entrySet()) if(entry.getKey()!=target) {
-                    if(entry.getValue()==registered) { shared=true; break; }
-                    if(entry.getValue() instanceof List<?> other) synchronized(other) {
-                        for(int i=0;i<other.size();i++) if(other.get(i)==listener) { shared=true; break; }
+            }
+            for(Object owner:owners) {
+                Object found=registration(index,owner);
+                if(found==null) continue;
+                if(!(found instanceof List<?> registered)) return result|TargetCleanup.RETAINED;
+                Object[] snapshot;
+                synchronized(registered) { snapshot=registered.toArray(); }
+                for(Object value:snapshot) {
+                    if(!(value instanceof IEventListener listener)
+                        || value.getClass().getMethod("equals",Object.class).getDeclaringClass()!=Object.class) {
+                        result|=TargetCleanup.RETAINED; continue;
                     }
-                    if(shared) break;
+                    boolean shared=false;
+                    for(var entry:index.entrySet()) if(!owners.contains(entry.getKey())) {
+                        if(entry.getValue()==registered) { shared=true; break; }
+                        if(entry.getValue() instanceof List<?> other) synchronized(other) {
+                            for(int i=0;i<other.size();i++) if(other.get(i)==listener) { shared=true; break; }
+                        }
+                        if(shared) break;
+                    }
+                    if(shared) { result|=TargetCleanup.RETAINED; continue; }
+                    if(registration(index,owner)!=registered) return result|TargetCleanup.RETRY;
+                    if(owner!=target && !cleanup.companion(owner)) { result|=TargetCleanup.RETRY;break; }
+                    synchronized(registered) {
+                        int slot=-1;
+                        for(int i=0;i<registered.size();i++) if(registered.get(i)==listener) {slot=i;break;}
+                        if(slot<0) { result|=TargetCleanup.RETRY; continue; }
+                        net.minecraftforge.eventbus.ListenerList.unregisterAll((Integer)get(BUS_ID,bus),listener);
+                        for(int i=registered.size()-1;i>=0;i--) if(registered.get(i)==listener) registered.remove(i);
+                    }
+                    if(registration(index,owner)!=registered) return result|TargetCleanup.RETRY;
                 }
-                if(shared) { result|=TargetCleanup.RETAINED; continue; }
-                if(registration(index,target)!=registered) return result|TargetCleanup.RETRY;
-                synchronized(registered) {
-                    int slot=-1;
-                    for(int i=0;i<registered.size();i++) if(registered.get(i)==listener) {slot=i;break;}
-                    if(slot<0) { result|=TargetCleanup.RETRY; continue; }
-                    net.minecraftforge.eventbus.ListenerList.unregisterAll((Integer)get(BUS_ID,bus),listener);
-                    for(int i=registered.size()-1;i>=0;i--) if(registered.get(i)==listener) registered.remove(i);
-                }
-                if(registration(index,target)!=registered) return result|TargetCleanup.RETRY;
+                // Dispatch detachment is not index reclamation. Do not retry a stable retained key every tick.
+                if(registration(index,owner)!=null)result|=TargetCleanup.RETAINED;
             }
-            // Dispatch detachment is not index reclamation. Do not retry a stable retained key every tick.
-            return registration(index,target)==null?result:result|TargetCleanup.RETAINED;
+            return result;
         } catch(java.util.ConcurrentModificationException changing) { return result|TargetCleanup.RETRY; }
         catch(ReflectiveOperationException | RuntimeException failure) { return result|TargetCleanup.RETAINED; }
     }

@@ -62,6 +62,54 @@ public final class NativeStartupCheck {
         check(failure.get()==null,"Bridge concurrent fixture failed");check(install.invoke(null)==bridge,"Final bridge state unavailable");
         System.out.println("EVENT_BRIDGE_PASS authenticated_installer exact_loader redefine_restore handlers_independent_baseline repeated_install concurrent_verify NO_GAME");
     }
+    private static void verifyCleanupTasks() throws Exception {
+        var direct=new java.util.concurrent.FutureTask<Void>(()->{},null);
+        try {SecretNative.invokeChecked("ReadCleanupTask",direct);throw new AssertionError("unauthenticated task reader accepted");}
+        catch(IllegalStateException expected){check(rootCause(expected) instanceof SecurityException,"wrong untrusted cleanup failure");}
+        for(String name:new String[]{"com/himitsu/secret/network/sync/SyncValue","com/himitsu/secret/network/sync/StringSetSyncValue",
+            "com/himitsu/secret/core/WeakTargetSet$Node","com/himitsu/secret/core/WeakTargetSet$Bucket",
+            "com/himitsu/secret/core/WeakTargetSet","com/himitsu/secret/core/TargetCleanup$1","com/himitsu/secret/core/TargetCleanup",
+            "com/himitsu/secret/core/TargetCleanup$Cleaner"}) {
+            byte[] image=authenticated.get(name);check(image!=null,"missing cleanup dependency "+name);
+            SecretNative.invokeChecked("DefineClass",name,SecretNative.class.getClassLoader(),image);
+        }
+        Class<?> type=Class.forName("com.himitsu.secret.core.TargetCleanup");
+        var read=type.getDeclaredMethod("readTask",Object.class);read.setAccessible(true);
+        check(!java.util.concurrent.FutureTask.class.getDeclaredField("callable").trySetAccessible(),"test unexpectedly opened JDK task fields");
+        Runnable body=()->{};var task=new java.util.concurrent.FutureTask<Void>(body,null);
+        Object[] snapshot=(Object[])read.invoke(null,task);check(snapshot.length==4&&snapshot[0]==body&&snapshot[2]==task,"trusted task unwrapping failed");
+        try {read.invoke(null,new Object());throw new AssertionError("arbitrary object accepted as task");}
+        catch(java.lang.reflect.InvocationTargetException expected){check(rootCause(expected) instanceof IllegalArgumentException,"wrong wrapper refusal");}
+        net.minecraft.SharedConstants.tryDetectVersion();
+        var bootstrap=net.minecraft.server.Bootstrap.class.getDeclaredField("isBootstrapped");bootstrap.setAccessible(true);bootstrap.set(null,true);
+        net.minecraft.core.registries.BuiltInRegistries.bootStrap();net.minecraftforge.registries.GameData.vanillaSnapshot();
+        var uf=sun.misc.Unsafe.class.getDeclaredField("theUnsafe");uf.setAccessible(true);var unsafe=(sun.misc.Unsafe)uf.get(null);
+        var target=(com.himitsu.secret.core.TargetGuardCheck.EntityFixture)unsafe.allocateInstance(com.himitsu.secret.core.TargetGuardCheck.EntityFixture.class);
+        target.uuid=java.util.UUID.randomUUID();
+        Class<?> cleaner=Class.forName("com.himitsu.secret.core.TargetCleanup$Cleaner");
+        // The released constructor reads SRG Entity fields; this disposable JVM uses official mappings.
+        // Prepare its existing Java-only context, then exercise the unchanged production task path.
+        Object context=unsafe.allocateInstance(cleaner);
+        for(var field:cleaner.getDeclaredFields()) {
+            if(java.lang.reflect.Modifier.isStatic(field.getModifiers()))continue;field.setAccessible(true);
+            if(field.getName().equals("target"))field.set(context,target);
+            else if(field.getName().equals("uuid"))field.set(context,target.uuid);
+            else if(field.getType()==java.util.Set.class)field.set(context,java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
+            else if(field.getType()==java.util.Map.class)field.set(context,new java.util.IdentityHashMap<>());
+        }
+        var tasks=cleaner.getDeclaredMethod("tasks",Object.class);tasks.setAccessible(true);
+        var own=new java.util.concurrent.FutureTask<Void>((Runnable)target,null);tasks.invoke(context,own);check(own.isCancelled(),"production cleaner failed through closed JDK Native path");
+        var companion=new java.util.concurrent.FutureTask<Void>(()->target.run(),null);
+        tasks.invoke(context,companion);check(companion.isCancelled(),"production Native path did not cancel companion");
+        var timer=new java.util.concurrent.ScheduledThreadPoolExecutor(1);
+        try {
+            var timed=timer.scheduleAtFixedRate((Runnable)target,1,1,java.util.concurrent.TimeUnit.DAYS);
+            var unrelated=timer.schedule(()->{},1,java.util.concurrent.TimeUnit.DAYS);
+            tasks.invoke(context,timer);check(timed.isCancelled()&&!timer.getQueue().contains(timed)&&!unrelated.isCancelled(),"scheduled cleanup isolation failed");
+            check(timer.submit(()->17).get(2,java.util.concurrent.TimeUnit.SECONDS)==17,"shared timer was stopped");
+        } finally {timer.shutdownNow();check(timer.awaitTermination(2,java.util.concurrent.TimeUnit.SECONDS),"test timer failed to exit");}
+        System.out.println("NATIVE_CLEANUP_PASS authenticated_reader closed_jdk_fields actual_cancel companion_cancel scheduler_isolation NO_GAME");
+    }
     private static void verifySourceShield(Path archive) throws Exception {
         int decoded=0;
         try(var zip=new java.util.zip.ZipFile(archive.toFile())) {
@@ -307,6 +355,7 @@ public final class NativeStartupCheck {
                 verifyPackageBinding(archive,Path.of(args[3]));
                 verifySourceShield(archive);
                 verifyEventBridge();
+                verifyCleanupTasks();
                 verifyCallbackPublication();
                 verifyThreadGuards();
                 verifyEnvironmentChain(directory);

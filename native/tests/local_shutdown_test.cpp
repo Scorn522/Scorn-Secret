@@ -260,7 +260,7 @@ int main(int argc,char** argv) {
     CHECK(state.initialize(reinterpret_cast<JavaVM*>(1),reinterpret_cast<jvmtiEnv*>(1))==0);
     {
         State::ReferenceRead initial(state,&env);auto next=std::make_unique<State::References>(*initial.get());
-        next->transformer=reinterpret_cast<jclass>(16);next->transformer_method=reinterpret_cast<jmethodID>(32);
+        next->cleanup_reader=reinterpret_cast<jclass>(48);next->transformer=reinterpret_cast<jclass>(16);next->transformer_method=reinterpret_cast<jmethodID>(32);
         CHECK(state.publish_references(initial.get(),next));
     }
     {
@@ -269,7 +269,7 @@ int main(int argc,char** argv) {
         auto empty=std::make_unique<State::References>();CHECK(state.publish_references(pinned.get(),empty));
         state.collect_references(&env);CHECK(deleted==0);
     }
-    CHECK(deleted==1);
+    CHECK(deleted==2);
     {
         State::ReferenceRead initial(state,&env);auto next=std::make_unique<State::References>(*initial.get());
         next->threads.push_back({reinterpret_cast<jobject>(64),nullptr});CHECK(state.publish_references(initial.get(),next));
@@ -286,15 +286,15 @@ int main(int argc,char** argv) {
     const auto start=GetTickCount64();
     std::thread closer([&] {CHECK(state.enter_call());complete=state.shutdown(&env);state.leave_call();done=true;});
     while(!state.shutting_down())std::this_thread::yield();
-    CHECK(!state.enter_call());Sleep(30);CHECK(!done && deleted==1 && lease_stops==0);
+    CHECK(!state.enter_call());Sleep(30);CHECK(!done && deleted==2 && lease_stops==0);
     if(timeout) {
-        closer.join();CHECK(!complete && GetTickCount64()-start<6500 && deleted==1 && lease_stops==0);
+        closer.join();CHECK(!complete && GetTickCount64()-start<6500 && deleted==2 && lease_stops==0);
         CHECK(state.initialized());CHECK(!state.shutdown(&env));
-        release=true;worker.join();CHECK(deleted==1);
+        release=true;worker.join();CHECK(deleted==2);
         std::puts(reader_timeout?"NATIVE_READER_TIMEOUT_PASS retired_reference_retained after_read_release_no_late_jni":"NATIVE_SHUTDOWN_TIMEOUT_PASS bounded_wait references_retained late_calls_refused duplicate_incomplete");
     } else {
         release=true;worker.join();closer.join();
-        CHECK(complete && done && deleted==2 && lease_stops==1 && !state.initialized());
+        CHECK(complete && done && deleted==3 && lease_stops==1 && !state.initialized());
         CHECK(!state.enter_call());CHECK(state.shutdown(&env));CHECK(lease_stops==1);
         std::puts("NATIVE_SHUTDOWN_PASS snapshot_pinning jni_outside_lock common_deadline inflight_drain ordered_revocation idempotent MODEL_NO_JVM");
     }

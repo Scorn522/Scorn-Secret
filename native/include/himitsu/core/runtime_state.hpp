@@ -34,7 +34,7 @@ public:
     struct ProtectedThread { jobject java_thread=nullptr; HANDLE os_thread=nullptr; };
     struct References {
         jclass transformer=nullptr, render=nullptr;
-        jclass bootstrap=nullptr, event_installer=nullptr, event_bridge=nullptr, event_bus=nullptr, event_array_type=nullptr;
+        jclass bootstrap=nullptr, cleanup_reader=nullptr, event_installer=nullptr, event_bridge=nullptr, event_bus=nullptr, event_array_type=nullptr;
         jobject game_loader=nullptr, event_loader=nullptr, event_handles[2]{};
         jfieldID event_field=nullptr;
         std::shared_ptr<const std::vector<unsigned char>> event_image;
