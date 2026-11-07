@@ -225,6 +225,7 @@ bool lifecycle_event(JNIEnv* env,const State::References& refs,int owner,jobject
         if(env->IsSameObject(type,refs.host_hooks[2])&&name=="dispatchSecret")dispatcher=true;
         if(dispatcher && env->IsSameObject(type,authority)&&name==(owner==0?"onPostClientTick":"handleServerStarting"))return true;
         if(ti->GetClassLoader(type,&loader)!=JVMTI_ERROR_NONE)return false;if(!loader)continue;
+        if(himitsu::platform::windows::owned_event_frame(env,type,refs.host_hooks[2],refs.event_bridge))continue;
         if(!same_source(env,type,refs.bootstrap) && !(refs.event_bus&&same_source(env,type,refs.event_bus))
             && !same_source(env,type,authority) && !same_source(env,type,game))return false;
     }
@@ -251,16 +252,56 @@ bool actual_exit_frame(JNIEnv* env,const State::References& refs,int owner) {
     }
     return false;
 }
+
+bool client_crash_exit(JNIEnv* env,const State::References& refs) {
+    // Exact Forge crash-report outlet, not a reusable exit ticket. JNI FindClass here uses the JDK loader.
+    auto* ti=State::instance().jvmti();jvmtiFrameInfo frames[64];jint count=0;int stage=0;jclass game=nullptr;
+    if(!refs.game_loader || !ti || ti->GetStackTrace(nullptr,0,64,frames,&count)!=JVMTI_ERROR_NONE || count==64)return false;
+    for(jint i=0;i<count;++i) {
+        jclass type=nullptr;jobject loader=nullptr;char *method=nullptr,*descriptor=nullptr,*signature=nullptr;
+        if(ti->GetMethodDeclaringClass(frames[i].method,&type)!=JVMTI_ERROR_NONE || ti->GetClassLoader(type,&loader)!=JVMTI_ERROR_NONE)return false;
+        int frame=-1;
+        if(!loader)frame=0;
+        else if(env->IsSameObject(loader,refs.game_loader)) {
+            auto named=ti->GetMethodName(frames[i].method,&method,&descriptor,nullptr);
+            auto typed=ti->GetClassSignature(type,&signature,nullptr);
+            if(named==JVMTI_ERROR_NONE&&typed==JVMTI_ERROR_NONE&&method&&descriptor&&signature) {
+                if(!std::strcmp(signature,"Lnet/minecraftforge/server/ServerLifecycleHooks;")&&!std::strcmp(method,"handleExit")&&!std::strcmp(descriptor,"(I)V"))frame=1;
+                if(!std::strcmp(signature,"Lnet/minecraft/client/Minecraft;")) {
+                    if((!std::strcmp(method,"crash")||!std::strcmp(method,"m_91332_"))&&!std::strcmp(descriptor,"(Lnet/minecraft/CrashReport;)V")){frame=2;game=type;}
+                    if(game&&env->IsSameObject(game,type)&&(!std::strcmp(method,"run")||!std::strcmp(method,"m_91374_"))&&!std::strcmp(descriptor,"()V"))frame=3;
+                }
+            }
+            for(char* value:{method,descriptor,signature})if(value)ti->Deallocate(reinterpret_cast<unsigned char*>(value));
+        }
+        stage=himitsu::platform::windows::crash_exit_step(stage,frame);if(stage<0)return false;
+        if(stage!=3)continue;
+        auto instance=env->GetStaticFieldID(game,"instance","Lnet/minecraft/client/Minecraft;");
+        if(!instance){env->ExceptionClear();instance=env->GetStaticFieldID(game,"f_90981_","Lnet/minecraft/client/Minecraft;");}
+        auto thread=env->GetFieldID(game,"gameThread","Ljava/lang/Thread;");
+        if(!thread){env->ExceptionClear();thread=env->GetFieldID(game,"f_91018_","Ljava/lang/Thread;");}
+        if(!instance||!thread)return false;
+        auto object=env->GetStaticObjectField(game,instance);jthread current=nullptr;
+        if(!object || (refs.host_objects[0]&&!env->IsSameObject(object,refs.host_objects[0])) || himitsu::jvm::trusted_current_thread(&current)!=JVMTI_ERROR_NONE)return false;
+        return env->IsSameObject(current,env->GetObjectField(object,thread))&&!env->ExceptionCheck();
+    }
+    return false;
+}
+
 bool exit_allowed(JNIEnv* env) {
     if(fatal_permit||shutdown_permit)return true;
-    if(exit_owner<0 || !exit_generation)return false;
-    State::ReferenceRead read(State::instance(),env);jthread current=nullptr;
-    if(himitsu::jvm::trusted_current_thread(&current)!=JVMTI_ERROR_NONE)return false;
-    bool allowed=read->host_generation[exit_owner]==exit_generation && read->host_phase[exit_owner]>=3
-        && env->IsSameObject(current,read->host_threads[exit_owner]);if(current)env->DeleteLocalRef(current);
-    if(allowed && env->PushLocalFrame(512)==0){allowed=actual_exit_frame(env,*read.get(),exit_owner);env->PopLocalFrame(nullptr);}else allowed=false;
-    return allowed&&!env->ExceptionCheck();
+    State::ReferenceRead read(State::instance(),env);
+    if(env->PushLocalFrame(512)<0)return false;
+    bool allowed=client_crash_exit(env,*read.get());
+    if(!allowed && !env->ExceptionCheck() && exit_owner>=0 && exit_generation) {
+        jthread current=nullptr;
+        if(himitsu::jvm::trusted_current_thread(&current)==JVMTI_ERROR_NONE)
+            allowed=read->host_generation[exit_owner]==exit_generation && read->host_phase[exit_owner]>=3
+                && env->IsSameObject(current,read->host_threads[exit_owner]) && actual_exit_frame(env,*read.get(),exit_owner);
+    }
+    env->PopLocalFrame(nullptr);return allowed&&!env->ExceptionCheck();
 }
+
 void deny_exit(JNIEnv* env) {
     denied_log("process exit");jobject error=himitsu::jvm::new_exception(env,"java/lang/SecurityException","Secret denied an unauthorized process exit");
     if(!error)return;auto global=env->NewGlobalRef(error);bool published=false;

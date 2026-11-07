@@ -45,13 +45,12 @@ public final class EventBusTakeover {
         register(PlayerEvent.Clone.class, NetworkLifecycle.PlayerSync::playerClone);
         register(PlayerEvent.PlayerRespawnEvent.class, NetworkLifecycle.PlayerSync::playerRespawn);
         register(ItemTossEvent.class, CivilizationSurvival::itemToss);
-        register(net.minecraftforge.event.server.ServerStartingEvent.class,SecretEntityHooks::serverStarting);
         register(LevelEvent.Unload.class, SecretEntityLifecycle::levelUnload);
         register(net.minecraftforge.event.entity.EntityLeaveLevelEvent.class, SecretEntityLifecycle::entityLeft);
         register(TickEvent.LevelTickEvent.class, CivilizationSurvival::levelTick);
         if (FMLEnvironment.dist == Dist.CLIENT) {
             register(TickEvent.ClientTickEvent.class, event -> {
-                if (event.phase == TickEvent.Phase.END) {RuntimeCompatibilityHooks.clientCore();CivilizationSurvival.clientTick();}
+                if (event.phase == TickEvent.Phase.END) CivilizationSurvival.clientTick();
             });
             register(net.minecraftforge.client.event.RenderLevelStageEvent.class, ForgeRenderBridge::renderLevel);
             register(net.minecraftforge.client.event.RenderGuiOverlayEvent.Post.class, ForgeRenderBridge::renderGui);
@@ -187,6 +186,9 @@ public final class EventBusTakeover {
         return null;
     }
     private static void dispatchSecret(Event event) {
+        // Authenticate directly through the sealed dispatcher, outside Consumer/lambda wrappers.
+        if(event instanceof TickEvent.ClientTickEvent tick && tick.phase==TickEvent.Phase.END) RuntimeCompatibilityHooks.clientCore();
+        else if(event instanceof net.minecraftforge.event.server.ServerStartingEvent starting) SecretEntityHooks.serverStarting(starting);
         for (Handler<?> handler : HANDLERS) handler.invokeIfCompatible(event);
     }
 

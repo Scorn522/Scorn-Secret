@@ -2,11 +2,26 @@
 
 公开开发仓库：[Scorn522/Scorn-Secret](https://github.com/Scorn522/Scorn-Secret)。本地维护者 Scorn；上游作者署名及各组件许可证保留。
 
-当前源码版本：`4.3-local-test-r24`，基线 `r23-fix1 / 9d8ba59`。本次按用户要求同步 r24 源码、构建配置、检查代码与交付记录；候选 JAR、原始日志及本机配置保留在本地。Java/Native 构建和两种包在两套 Java 下的独立检查已通过，尚未部署或实机验收。开发包为 `build/libs/Secret-4.3-local-test-r24.jar`，独立轻量混淆包为 `build/libs/Secret-4.3-local-test-r24-release.jar`。保留旧版成品。
+当前源码版本：`4.3-local-test-r24-fix1`，基线为已同步的 `r24 / f0c9b54`。本轮经用户明确批准，只修复事件登记的真实 Class 身份核验、直接分派接线及 Forge 崩溃退出误拦。源码、Java/Native 构建及两种包在两套 Java 下的离线检查已完成。本次按用户要求同步 fix1 源码、构建配置、检查代码与交付记录；候选包、原始日志及本机配置仍留在本地，未部署或启动游戏。开发包为 `build/libs/Secret-4.3-local-test-r24-fix1.jar`，独立轻量混淆包为 `build/libs/Secret-4.3-local-test-r24-fix1-release.jar`；保留原 r24 成品。
 
 
-基于 `Secret-4.3-local-test-r2`，固定开发目录为 `D:\桌面\Secret-4.3-dev`。版本 `4.3-local-test-r24`，保留原 Mod ID、Java/JNI 命名与资源。原始下载源码及独立 Scorn Secret 工程没有覆盖。
+基于 `Secret-4.3-local-test-r2`，固定开发目录为 `D:\桌面\Secret-4.3-dev`。版本 `4.3-local-test-r24-fix1`，保留原 Mod ID、Java/JNI 命名与资源。原始下载源码及独立 Scorn Secret 工程没有覆盖。
 
+
+## r24-fix1：事件登记与 Forge 崩溃退出修复（2026-11-07）
+
+修复与离线验收阶段的起止 HEAD 均为 `f0c9b5406401e50a77351a8541a9019a3cf7f24e`；随后按用户要求单独同步本批。保留原有未跟踪 CFR 工具；只修改既有生产、检查、构建与本文。r24 已同步，但用户上传的 00:34:08 错误报告随后证明其真实客户端在首次 ClientTick 核心线程登记时崩溃；此前独立 JVM 通过不能代表 Forge 实机通过。
+
+- **现场首因**：`HostLifecycle(client-register)` 在 `EventBusTakeover` 与 JNI 定义的 `SecretEventBusBridge` 上按 JAR CodeSource 判源；这些已认证实际 Class 没有 CodeSource，合法事件链被拒。现在精确匹配已有引用快照中的实际分派器和桥接 Class，异加载器同名对象继续拒绝。客户端及服务端登记迁到 `dispatchSecret` 直接路径，删除原 Consumer/Handler 间接登记；已登记后仍只读原标志。
+- **退出次因**：Forge 的 `ServerLifecycleHooks.handleExit -> Minecraft.crash -> Minecraft.run` 崩溃报告出口缺少正常退出票据，再被 `Shutdown.beforeHalt` 拒绝。现在只接受该顺序、准确方法描述符、实际游戏加载器、Minecraft 单例及其真实主线程；不签发可复用许可、不吞掉任意拒绝异常，也不放宽其他退出请求。读取沿用现有引用快照，JNI/JVMTI 在锁外；没有新增 Hook、线程、生产类型或游戏热路径扫描。
+- **完整构建**：`.work/r24-fix1-build.log` 的 `build checkNativeStartup secureJar --offline --console=plain --no-daemon` 成功，1 分 28 秒，33 项任务（29 执行、4 复用）。Java、生产 DLL、开发包与独立发布包本轮实际生成；`checkNativeShutdown`、Forge 登记、Java 关闭、r16/r20 目标守卫、r22 桥接及 r23 精确清理检查实际通过。标准 `test` 为 NO-SOURCE，实际检查来自既有 check 任务。
+- **四组独立启动**：开发包在构建 JDK 的结果包含于上述完整构建，PCL Java 结果为 `.work/r24-fix1-pcl-dev.log`（27 秒）；发布包分别为 `.work/r24-fix1-release-buildjdk2.log`（23 秒）、`.work/r24-fix1-release-pcl.log`（17 秒）。均加载同一配套生产 DLL，包绑定、SourceShield、句柄修复、线程保护、外部 Attach 拒绝及真实 JVM 关闭钩子检查通过，退出码均为 0。后续命令用 `-PsmokeJar` 固定已生成候选，不重新打包；检查 DLL 加入生产头文件依赖，避免复用过时的模型。
+- **新增检查的边界**：真实 JNI 定义的分派器/桥接确认 CodeSource 为空，实际 Class 身份匹配通过、异加载器对象拒绝；崩溃调用链顺序模型覆盖缺帧、错序和夹入未知帧。该模型不等于真实 Forge 崩溃出口验收，本轮没有触发游戏崩溃或测试菜单退出。生产 DLL 自然关闭仍有独立进程 ExitCode=0 证据。
+- **一次环境失败**：首个发布包检查在 ForgeGradle 联网证书预检阶段失败，未执行候选。后两次沿用已有命令级 `-Dnet.minecraftforge.gradle.check.certs=false` 配合 `--offline`，只跳过构建插件联网预检，不修改生产 TLS、下载依赖或退出防护；原失败日志 `.work/r24-fix1-release-buildjdk.log` 保留。
+
+开发包 **1,548,549 字节**，SHA-256 `7173ED4B340554F7D50E482AA81F58C9D8B9877A1D2AA742721F7E8EEBC6B83F`；独立发布包 **1,435,448 字节**，SHA-256 `E023D57CB1D6DFF266B456B649B573FB18E847E6C323636173E06D8F4E06A4F5`。两包均保持 **89 个业务类**、原模块描述及唯一生产 `himitsu.dll`，无检查类、测试 DLL、脚本或日志。r13 攻击/挥击文件摘要仍为 `05F0CA04266AA07F7B38487908EE880F057CDB586D40531BF9049D3DC843974F`。
+
+新贴审查另指出普通关闭链和提前加载的钩子覆盖风险。源码确认目前先反射登记再开启转换，且一次性重转换清单并未覆盖全部被提及类型；精确漏织入数量尚无本轮实机证据。正常 `client-stop/server-stop` 仍需独立核对合法输入、控制台和关闭钩子入口，本次只修报告中的崩溃退出链。没有采用“拒绝后仍继续 stop”、任意实例字段清空或新增 `baseTick` 守卫。后者也不能阻止子类在父方法前后自行执行代码。实机启动、菜单关闭、攻防、FPS 和保存退出均未执行，不宣称这些剩余问题已解决。
 
 ## r24：进程内防护与独立发布
 
@@ -62,7 +77,7 @@
 ## 构建
 
 设置 JDK17 的 `JAVA_HOME`，Python 和 Zig 0.13.0 可分别用 `HIMITSU_PYTHON`、`HIMITSU_ZIG` 指定，然后执行 `./gradlew.bat build --console=plain`。
-默认仅编译、离线检查和打包，不启动游戏、部署或上传。开发包为 `build/libs/Secret-4.3-local-test-r24.jar`，不要安装 intermediate JAR。原 r2 的本地开发配置和退出协调修复保留。
+默认仅编译、离线检查和打包，不启动游戏、部署或上传。开发包为 `build/libs/Secret-4.3-local-test-r24-fix1.jar`，不要安装 intermediate JAR。原 r2 的本地开发配置和退出协调修复保留。
 
 ## 证据与边界
 

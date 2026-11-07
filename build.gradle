@@ -5,7 +5,7 @@ plugins {
     id 'net.minecraftforge.gradle' version '[6.0,6.2)'
 }
 
-version = '4.3-local-test-r24'
+version = '4.3-local-test-r24-fix1'
 group = 'com.himitsu.secret'
 
 base {
@@ -502,7 +502,7 @@ tasks.named('check').configure { dependsOn tasks.named('checkNativeBootstrap') }
 
 tasks.register('compileBridgeBindingCheck', Exec) {
     dependsOn tasks.named('compileJava')
-    inputs.files file('native/tests/bridge_binding_test.cpp'), file('tools/build_native.py')
+    inputs.files file('native/tests/bridge_binding_test.cpp'), file('native/include/himitsu/platform/windows/thread_guard.hpp'), file('tools/build_native.py')
     outputs.file layout.buildDirectory.file('bridge-binding-check.dll')
     doFirst {
         environment 'JAVA_HOME', tasks.named('compileJava').get().javaCompiler.get().metadata.installationPath.asFile.absolutePath

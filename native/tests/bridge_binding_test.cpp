@@ -1,4 +1,6 @@
 #include <jni.h>
+#include <initializer_list>
+#include "himitsu/platform/windows/thread_guard.hpp"
 #include <jvmti.h>
 #include <windows.h>
 #include <cstdint>
@@ -140,4 +142,14 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_himitsu_secret_bridge_NativeStartupC
     auto call=reinterpret_cast<decltype(&ShellExecuteExW)>(GetProcAddress(GetModuleHandleW(L"shell32.dll"),"ShellExecuteExW"));
     if(!call || !call(&info))return -static_cast<jlong>(GetLastError());
     if(!info.hProcess)return 0;WaitForSingleObject(info.hProcess,3000);DWORD result=1;GetExitCodeProcess(info.hProcess,&result);CloseHandle(info.hProcess);return 1+static_cast<jlong>(result);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL Java_com_himitsu_secret_bridge_NativeStartupCheck_lifecycleFrames(JNIEnv* env,jclass,jclass dispatcher,jclass bridge,jclass foreign) {
+    using namespace himitsu::platform::windows;
+    auto alias=static_cast<jclass>(env->NewLocalRef(dispatcher));
+    bool exact=owned_event_frame(env,alias,dispatcher,bridge)&&owned_event_frame(env,bridge,dispatcher,bridge)
+        && !owned_event_frame(env,foreign,dispatcher,bridge)&&!owned_event_frame(env,nullptr,dispatcher,bridge);
+    env->DeleteLocalRef(alias);
+    auto accepts=[](std::initializer_list<int> frames){int state=0;for(int frame:frames){state=crash_exit_step(state,frame);if(state<0)return false;}return state==3;};
+    return exact&&accepts({0,0,1,2,3})&&!accepts({0,1,3})&&!accepts({0,1,2})&&!accepts({0,1,2,-1,3})&&!accepts({0,2,3});
 }

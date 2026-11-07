@@ -91,7 +91,7 @@ def main():
         output = ROOT / "build/bridge-binding-check.dll"
         output.parent.mkdir(parents=True, exist_ok=True)
         run([zig, "c++", "-target", "x86_64-windows-gnu", "-std=c++20", "-O2", "-shared",
-             "-I", java / "include", "-I", java / "include/win32",
+             "-I", java / "include", "-I", java / "include/win32", "-I", ROOT / "native/include",
              ROOT / "native/tests/bridge_binding_test.cpp", "-o", output])
         return
     if mode == "configure":

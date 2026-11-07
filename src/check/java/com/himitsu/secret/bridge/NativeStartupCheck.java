@@ -17,6 +17,7 @@ public final class NativeStartupCheck {
     private static native int directAttach();
     private static native long shellCreate(String program,String arguments);
     private static native void installFailureProbe();
+    private static native boolean lifecycleFrames(Class<?> dispatcher,Class<?> bridge,Class<?> foreign);
     private static String sha(Path path) throws Exception {return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(java.nio.file.Files.readAllBytes(path)));}
     private static void prepareHostPolicy(Path directory,Path probeDll) throws Exception {
         var config=new java.util.Properties();Path source=Path.of(NativeStartupCheck.class.getProtectionDomain().getCodeSource().getLocation().toURI());
@@ -129,6 +130,10 @@ public final class NativeStartupCheck {
         ClassLoader other=new java.net.URLClassLoader(new java.net.URL[0],busType.getClassLoader());
         Class<?> foreign=(Class<?>)SecretNative.invokeChecked("DefineClass",name,other,bad);
         check((boolean)foreign.getMethod("post",busType,net.minecraftforge.eventbus.api.Event.class).invoke(null,bus,null),"Different loader was rewritten");
+        Class<?> dispatcher=Class.forName("com.himitsu.secret.core.EventBusTakeover");
+        check(dispatcher.getProtectionDomain().getCodeSource()==null && bridge.getProtectionDomain().getCodeSource()==null,"JNI-defined lifecycle fixture unexpectedly has a JAR CodeSource");
+        check(lifecycleFrames(dispatcher,bridge,foreign),"Lifecycle class identity or crash outlet ordering failed");
+        System.out.println("LIFECYCLE_FRAME_PASS actual_null_codesource_classes exact_identity foreign_loader_refused crash_order MODEL_NO_GAME");
         var failure=new java.util.concurrent.atomic.AtomicReference<Throwable>();
         Thread writerThread=new Thread(()->{try {for(int i=0;i<80;i++)slot.set(null,expected.clone());}catch(Throwable error){failure.set(error);}},"Secret-check-bridge-writer");
         writerThread.start();for(int i=0;i<80;i++)check(install.invoke(null)==bridge,"Concurrent bridge verification failed");writerThread.join();

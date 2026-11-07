@@ -3,6 +3,16 @@
 #include <cstdint>
 #include <jni.h>
 namespace himitsu::platform::windows {
+// JNI definitions need not have a JAR CodeSource. Trust only the authenticated actual Class objects.
+inline bool owned_event_frame(JNIEnv* env,jclass type,jclass dispatcher,jclass bridge) {
+    return type && ((dispatcher && env->IsSameObject(type,dispatcher)) || (bridge && env->IsSameObject(type,bridge)));
+}
+// 0=platform prefix, 1=Forge handleExit, 2=Minecraft crash, 3=game loop; other/order-changed frames reject.
+inline int crash_exit_step(int state,int frame) {
+    if(state==0 && frame==0)return 0;
+    if(state>=0 && state<3 && frame==state+1)return frame;
+    return -1;
+}
 bool start_thread_guard();
 jobject host_command(JNIEnv* env,const char* command,jobject first,jobject second);
 bool host_shutdown_authorized();
